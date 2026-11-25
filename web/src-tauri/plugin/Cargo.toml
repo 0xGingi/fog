@@ -1,0 +1,14 @@
+[package]
+name = "tauri-plugin-fog"
+version = "0.3.0"
+description = "Fog's phone-only native code: push notification tokens and Android app updates"
+license = "AGPL-3.0-only"
+edition = "2024"
+links = "tauri-plugin-fog"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+tauri = "2.12.7"
+
+[build-dependencies]
+tauri-plugin = { version = "2.7.4", features = ["build"] }

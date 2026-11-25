@@ -1,0 +1,10 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "org.getfog.app",
+      "sha256_cert_fingerprints": ["B3:7C:BF:35:69:A1:CF:2D:97:D0:DB:FB:43:72:B5:25:6F:4D:59:E2:E7:43:8D:E1:C7:7F:0B:DC:FC:C8:FA:51"]
+    }
+  }
+]

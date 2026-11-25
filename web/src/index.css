@@ -88,7 +88,23 @@ body {
   height: 100%;
 }
 #root {
-  height: 100dvh;
+  /* The keyboard covers the home-indicator padding, so most of that padding slides under it (no
+     jump) and the composer keeps its usual small gap above the keyboard. */
+  height: calc(var(--app-h, 100dvh) - var(--keyboard-lift));
+}
+/* Bottom padding for the home indicator; none while the keyboard is up (see main.tsx). */
+:root {
+  --safe-bottom: env(safe-area-inset-bottom);
+  /* How far the iPhone app's keyboard pushes things up (main.tsx sets --keyboard); full-screen
+     dialogs and panels end there too, so the keyboard never covers them. */
+  --keyboard-lift: max(0px, var(--keyboard, 0px) - max(0px, env(safe-area-inset-bottom) - 0.6rem));
+}
+/* While the chat slides with the keyboard (main.tsx), iOS's text cursor would lag and snap back. */
+:root[data-sliding] :is(input, textarea, [contenteditable]) {
+  caret-color: transparent;
+}
+:root[data-keyboard] {
+  --safe-bottom: 0px;
 }
 body {
   background: var(--bg);
@@ -313,5 +329,22 @@ body {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+/* Touch screens: long-press opens Fog's own menus (with "Copy text"), so the browser's text
+   selection and link/image callouts stay out of the way, as in native messengers. */
+@media (pointer: coarse) {
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+  input,
+  textarea,
+  [contenteditable] {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
   }
 }

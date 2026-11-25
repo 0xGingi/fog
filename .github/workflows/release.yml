@@ -108,6 +108,14 @@ jobs:
             [ -n "${!k}" ] && echo "$k=${!k}" >> "$GITHUB_ENV"
           done
 
+      # GitHub's macOS runners sometimes fail making the .dmg ("hdiutil: create failed - Resource busy")
+      # because Spotlight or XProtect is scanning the new disk image. Keep them out of the way.
+      - name: Quiet Spotlight and XProtect (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sudo mdutil -a -i off || true
+          sudo pkill -9 XProtect || true
+
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -133,6 +141,157 @@ jobs:
           # to releases/latest/download/<file> and always serve the newest build.
           releaseAssetNamePattern: ${{ matrix.asset }}[setup][ext]
           uploadWorkflowArtifacts: true
+          # One more try if a build or upload hits a transient runner error.
+          retryAttempts: 1
           # latest.json: what installed apps check for updates (macOS .app.tar.gz, Windows setup.exe, Linux AppImage).
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
+
+  # Android: one signed APK (arm64, 32-bit ARM, x86_64) attached to the release as Fog-Android.apk.
+  # GitHub's Ubuntu image already has the Android SDK, NDK and Java 17.
+  android:
+    name: Android
+    needs: core
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      HAS_KEYSTORE: ${{ secrets.FOG_ANDROID_KEYSTORE_B64 != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fog-core
+          path: web/src/core
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: web/src-tauri -> target
+          key: android
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - name: Android SDK pieces
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.2" "build-tools;37.0.0" > /dev/null
+      - name: Version from tag
+        if: github.ref_type == 'tag'
+        working-directory: web
+        run: V="${GITHUB_REF_NAME#v}" bun -e 'const f = "src-tauri/tauri.conf.json"; const c = await Bun.file(f).json(); c.version = process.env.V; await Bun.write(f, JSON.stringify(c, null, 2) + "\n")'
+      # Every update must be signed with the same key, or Android refuses to install it over the old app.
+      - name: Signing key
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.FOG_ANDROID_KEYSTORE_B64 }}
+        run: |
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/fog-release.jks"
+          echo "FOG_ANDROID_KEYSTORE=$RUNNER_TEMP/fog-release.jks" >> "$GITHUB_ENV"
+      # Push notifications (Firebase). Without this secret the APK still builds; it just can't get pushes.
+      - name: Firebase config
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        if: env.GOOGLE_SERVICES_JSON != ''
+        run: printf '%s' "$GOOGLE_SERVICES_JSON" > web/src-tauri/gen/android/app/google-services.json
+      - name: Build APK
+        working-directory: web
+        env:
+          FOG_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.FOG_ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          bunx tauri android build --apk --target aarch64 --target armv7 --target x86_64
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk/universal/release -name '*.apk' | head -1)
+          cp "$apk" "$GITHUB_WORKSPACE/Fog-Android.apk"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fog-android
+          path: Fog-Android.apk
+      - name: Attach to the release
+        if: github.ref_type == 'tag' && env.HAS_KEYSTORE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # The desktop jobs usually create the release; wait for it, or create it if they haven't.
+          for _ in $(seq 1 15); do gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 && break; sleep 60; done
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "Fog $GITHUB_REF_NAME" --notes "Fog $GITHUB_REF_NAME"
+          gh release upload "$GITHUB_REF_NAME" Fog-Android.apk --clobber
+
+  # iOS: signed for the App Store and uploaded to TestFlight. Switches on once the Apple secrets
+  # exist (see README); until then it only says it's skipping.
+  ios:
+    name: iOS (TestFlight)
+    needs: core
+    runs-on: macos-26
+    env:
+      HAS_IOS: ${{ secrets.IOS_CERTIFICATE != '' && secrets.IOS_MOBILE_PROVISION != '' && secrets.APPSTORE_API_KEY != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Signing secrets
+        if: env.HAS_IOS != 'true'
+        run: echo "::notice::iOS signing secrets aren't set yet, so there's no TestFlight build this time."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.HAS_IOS == 'true'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: env.HAS_IOS == 'true'
+        with:
+          name: fog-core
+          path: web/src/core
+      # Newest Xcode on the runner, so builds use the newest iOS SDK (the App Store sets a minimum).
+      - name: Xcode
+        if: env.HAS_IOS == 'true'
+        run: |
+          xcode=$(ls -d /Applications/Xcode_*.app | grep -viE 'beta|rc' | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        if: env.HAS_IOS == 'true'
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: env.HAS_IOS == 'true'
+        with:
+          workspaces: web/src-tauri -> target
+          key: ios
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: env.HAS_IOS == 'true'
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+        if: env.HAS_IOS == 'true'
+        working-directory: web
+      - name: Version from tag
+        if: env.HAS_IOS == 'true' && github.ref_type == 'tag'
+        working-directory: web
+        run: V="${GITHUB_REF_NAME#v}" bun -e 'const f = "src-tauri/tauri.conf.json"; const c = await Bun.file(f).json(); c.version = process.env.V; await Bun.write(f, JSON.stringify(c, null, 2) + "\n")'
+      - name: Build for the App Store
+        if: env.HAS_IOS == 'true'
+        working-directory: web
+        env:
+          # Apple Distribution certificate (.p12, base64) and App Store provisioning profile (base64).
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+        run: bunx tauri ios build --export-method app-store-connect
+      - name: Upload to TestFlight
+        if: env.HAS_IOS == 'true' && github.ref_type == 'tag'
+        env:
+          API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          API_ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          API_KEY: ${{ secrets.APPSTORE_API_KEY }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          printf '%s' "$API_KEY" > ~/.appstoreconnect/private_keys/AuthKey_"$API_KEY_ID".p8
+          ipa=$(find web/src-tauri/gen/apple/build -name '*.ipa' | head -1)
+          xcrun altool --upload-app --type ios --file "$ipa" --apiKey "$API_KEY_ID" --apiIssuer "$API_ISSUER"

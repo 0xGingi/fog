@@ -720,7 +720,7 @@ export function MediaViewer({ chat, start, onClose }: { chat: Chat; start: strin
     )
   return (
     <div className="fade-in fixed inset-0 z-50 flex flex-col bg-black/95 text-white" onClick={onClose} role="dialog" aria-label="Media viewer">
-      <header className="flex items-center gap-3 p-3" onClick={(e) => e.stopPropagation()}>
+      <header className="flex items-center gap-3 p-3 pt-[max(0.75rem,env(safe-area-inset-top))]" onClick={(e) => e.stopPropagation()}>
         <div className="min-w-0 flex-1 px-2">
           <p className="truncate font-semibold">{m.mine ? 'You' : chat.group ? personName(m.from ?? '') : chatTitle(chat)}</p>
           <p className="text-sm text-white/60">

@@ -86,7 +86,7 @@ export function CallScreen() {
         <Media stream={c.local} muted mirror className="absolute right-4 bottom-36 z-10 aspect-[3/4] w-28 rounded-2xl object-cover shadow-2xl ring-1 ring-white/20 sm:w-40" />
       )}
 
-      <div className="relative z-10 mt-auto flex items-end justify-center gap-8 pb-[max(2.5rem,env(safe-area-inset-bottom))]">
+      <div className="relative z-10 mt-auto flex items-end justify-center gap-8 pb-[max(2.5rem,var(--safe-bottom))]">
         {c.phase === 'ended' ? null : !c.out && c.phase === 'ringing' ? (
           <>
             <Round label="Decline" tone="red" big onClick={decline} icon={<span className="rotate-[135deg]">{phone}</span>} />

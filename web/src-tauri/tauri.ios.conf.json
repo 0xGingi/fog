@@ -1,0 +1,25 @@
+{
+  "identifier": "org.getfog.app",
+  "bundle": {
+    "iOS": {
+      "developmentTeam": "YP8HMR9NR6",
+      "minimumSystemVersion": "26.0"
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "mobile": [
+        {
+          "scheme": [
+            "https"
+          ],
+          "host": "getfog.org",
+          "pathPrefix": [
+            "/app"
+          ],
+          "appLink": true
+        }
+      ]
+    }
+  }
+}

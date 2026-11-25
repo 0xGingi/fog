@@ -174,7 +174,7 @@ export function passcodeBits(code: string) {
 export const MIN_PASSCODE_BITS = 40
 
 // ---------- passkey (WebAuthn PRF) ----------
-export const passkeySupported = () => typeof PublicKeyCredential !== 'undefined'
+export const passkeySupported = () => typeof PublicKeyCredential !== 'undefined' && !('__TAURI_INTERNALS__' in window)
 
 async function prfOutput(cred: ArrayBuffer, salt: Uint8Array<ArrayBuffer>): Promise<ArrayBuffer> {
   const a = (await navigator.credentials.get({

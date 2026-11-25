@@ -1,10 +1,14 @@
 [package]
 name = "fog-desktop"
-version = "0.1.0"
+version = "0.3.0"
 description = "Fog desktop app"
 license = "AGPL-3.0-only"
 edition = "2024"
 rust-version = "1.90"
+
+[lib]
+name = "fog_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.7.6", features = [] }
@@ -12,7 +16,15 @@ tauri-build = { version = "2.7.6", features = [] }
 [dependencies]
 serde_json = "1.0.154"
 tauri = { version = "2.12.7", features = ["tray-icon", "image-png"] }
-tauri-plugin-dialog = "2.8.4"
 tauri-plugin-notification = "2.8.1"
+
+# Desktop only: self-updates (phones update through TestFlight / a new APK).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-dialog = "2.8.4"
 tauri-plugin-updater = "2.14.1"
 tokio = { version = "1.54.1", features = ["time"] }
+
+# Phones only: push notification tokens, Android update offers (Swift/Kotlin in plugin/).
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-deep-link = "2.6.3"
+tauri-plugin-fog = { path = "plugin" }

@@ -103,9 +103,14 @@ const m2 = await A.next()
 assert(open(alice, m2) === 'hi alice', 'alice decrypts')
 await A.rpc({ t: 'ack', id: m2.id })
 
+// Push: phones register a token; tokens outside their alphabet are refused (they end up in URLs).
+assert(!(await B.rpc({ t: 'push', kind: 'fcm', token: 'e2e-test:APA91b-token_0123456789' })).error, 'push token registered')
+assert((await B.rpc({ t: 'push', kind: 'apns', token: `${'a'.repeat(64)}/../x` })).error === 'bad token', 'bad push token refused')
+assert(!(await B.rpc({ t: 'away', away: true })).error, 'away accepted')
+
 // Offline delivery: bob disconnects, alice sends, bob reconnects and gets it queued.
 B.ws.close()
-await A.rpc({ t: 'send', to: bob.id, msgs: [enc(alice, bob.id, 1, 'while you were out')] })
+await A.rpc({ t: 'send', to: bob.id, msgs: [enc(alice, bob.id, 1, 'while you were out')], urgent: true })
 const B2 = await client(bob)
 assert(B2.ready.username === `bob_${tag}`, 'username survives reconnect')
 const m3 = await B2.next()

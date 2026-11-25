@@ -1,0 +1,465 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		09B77235175C4702056D26A0 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 448AA321D2C952BD5A15DE89 /* UIKit.framework */; };
+		14B113B39500B4D4BE1A4554 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3761384D5F2E501CADFCE00A /* Metal.framework */; };
+		1CC1FB6B634FD9F5EE7110B9 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 21B42C8353B6403D5676A931 /* MetalKit.framework */; };
+		460B944A46CA9DF35B3B3092 /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = 8BD878394497FA46A78D441B /* main.mm */; };
+		4BDD2E893A5AB63777341ABF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = C47EE911D69204F802FCFAF5 /* LaunchScreen.storyboard */; };
+		7F10B2C9DD36647E05DEFADC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C18E4CD9E191571C9BD4133D /* Assets.xcassets */; };
+		7FA947307FD81DACCDCD6756 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EFBAC26251657C9B8FA3F3E6 /* QuartzCore.framework */; };
+		A04985DCA3FFD4E5C4FA80CE /* libapp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = D88C40A4EEE1BB71E1A1BE81 /* libapp.a */; };
+		A3F20CC4246381C7C919D638 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A8705B13DEC427915DC2EBDB /* Security.framework */; };
+		A41138F3FD10A3C48AB53AFD /* assets in Resources */ = {isa = PBXBuildFile; fileRef = C602905D99844221D802A1B3 /* assets */; };
+		BDD56C239198940434339E82 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D0B6FAB4A51B8B82CAB31A9B /* WebKit.framework */; };
+		CBDC1E4C14B274A9D407DE75 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A0EC4BA1349D4C22C2D06434 /* CoreGraphics.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		07EBFC94D80B8C83C88B431F /* fog-desktop_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "fog-desktop_iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		0A055A5808C96F36C18A3933 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		139572179804E403C289F04F /* fog-desktop_iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "fog-desktop_iOS.entitlements"; sourceTree = "<group>"; };
+		17C01EE00E70B438B3295977 /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
+		21B42C8353B6403D5676A931 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
+		3761384D5F2E501CADFCE00A /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		3E9957CBED15D579A7632AEB /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
+		448AA321D2C952BD5A15DE89 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		76006B21B365BCF3B0426DE7 /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
+		8BD878394497FA46A78D441B /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
+		A0EC4BA1349D4C22C2D06434 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+		A8705B13DEC427915DC2EBDB /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		C18E4CD9E191571C9BD4133D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		C47EE911D69204F802FCFAF5 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		C602905D99844221D802A1B3 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
+		D0B6FAB4A51B8B82CAB31A9B /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
+		D88C40A4EEE1BB71E1A1BE81 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
+		EFBAC26251657C9B8FA3F3E6 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C560EEE57BA8E73F115AEAEE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A04985DCA3FFD4E5C4FA80CE /* libapp.a in Frameworks */,
+				CBDC1E4C14B274A9D407DE75 /* CoreGraphics.framework in Frameworks */,
+				14B113B39500B4D4BE1A4554 /* Metal.framework in Frameworks */,
+				1CC1FB6B634FD9F5EE7110B9 /* MetalKit.framework in Frameworks */,
+				7FA947307FD81DACCDCD6756 /* QuartzCore.framework in Frameworks */,
+				A3F20CC4246381C7C919D638 /* Security.framework in Frameworks */,
+				09B77235175C4702056D26A0 /* UIKit.framework in Frameworks */,
+				BDD56C239198940434339E82 /* WebKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		2D0A82D6CE91AA5A42CD5089 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				07EBFC94D80B8C83C88B431F /* fog-desktop_iOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		2D24B95E27FC113503C7A363 /* Externals */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Externals;
+			sourceTree = "<group>";
+		};
+		3A319E9750AB25DDD271B0E7 /* bindings */ = {
+			isa = PBXGroup;
+			children = (
+				17C01EE00E70B438B3295977 /* bindings.h */,
+			);
+			path = bindings;
+			sourceTree = "<group>";
+		};
+		6B3B475D1B414FC281441673 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				931D7E6D1E0EC5A39626EEBC /* fog-desktop */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		931D7E6D1E0EC5A39626EEBC /* fog-desktop */ = {
+			isa = PBXGroup;
+			children = (
+				8BD878394497FA46A78D441B /* main.mm */,
+				3A319E9750AB25DDD271B0E7 /* bindings */,
+			);
+			path = "fog-desktop";
+			sourceTree = "<group>";
+		};
+		C4D7919937D0E57B7C6DBF4D /* fog-desktop_iOS */ = {
+			isa = PBXGroup;
+			children = (
+				139572179804E403C289F04F /* fog-desktop_iOS.entitlements */,
+				0A055A5808C96F36C18A3933 /* Info.plist */,
+			);
+			path = "fog-desktop_iOS";
+			sourceTree = "<group>";
+		};
+		F439651D9BB8D4073A5D91E8 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A0EC4BA1349D4C22C2D06434 /* CoreGraphics.framework */,
+				D88C40A4EEE1BB71E1A1BE81 /* libapp.a */,
+				3761384D5F2E501CADFCE00A /* Metal.framework */,
+				21B42C8353B6403D5676A931 /* MetalKit.framework */,
+				EFBAC26251657C9B8FA3F3E6 /* QuartzCore.framework */,
+				A8705B13DEC427915DC2EBDB /* Security.framework */,
+				448AA321D2C952BD5A15DE89 /* UIKit.framework */,
+				D0B6FAB4A51B8B82CAB31A9B /* WebKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		FBD99C66528723BCA1666663 /* src */ = {
+			isa = PBXGroup;
+			children = (
+				3E9957CBED15D579A7632AEB /* lib.rs */,
+				76006B21B365BCF3B0426DE7 /* main.rs */,
+			);
+			name = src;
+			path = ../../src;
+			sourceTree = "<group>";
+		};
+		FD6EF6CCC58C87B883B6868C = {
+			isa = PBXGroup;
+			children = (
+				C602905D99844221D802A1B3 /* assets */,
+				C18E4CD9E191571C9BD4133D /* Assets.xcassets */,
+				C47EE911D69204F802FCFAF5 /* LaunchScreen.storyboard */,
+				2D24B95E27FC113503C7A363 /* Externals */,
+				C4D7919937D0E57B7C6DBF4D /* fog-desktop_iOS */,
+				6B3B475D1B414FC281441673 /* Sources */,
+				FBD99C66528723BCA1666663 /* src */,
+				F439651D9BB8D4073A5D91E8 /* Frameworks */,
+				2D0A82D6CE91AA5A42CD5089 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		9C5EC128007C8328E7EDF959 /* fog-desktop_iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8BD77B8F7686F39A85CC93CE /* Build configuration list for PBXNativeTarget "fog-desktop_iOS" */;
+			buildPhases = (
+				5061D69345763C86E8AA2928 /* Build Rust Code */,
+				398E925C8611157DE3A835FB /* Sources */,
+				B2E031B8BFAAAD79699BF6F5 /* Resources */,
+				C560EEE57BA8E73F115AEAEE /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "fog-desktop_iOS";
+			packageProductDependencies = (
+			);
+			productName = "fog-desktop_iOS";
+			productReference = 07EBFC94D80B8C83C88B431F /* fog-desktop_iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		D3B1672299DA5C88177F0F49 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					9C5EC128007C8328E7EDF959 = {
+						DevelopmentTeam = YP8HMR9NR6;
+					};
+				};
+			};
+			buildConfigurationList = 724747CEE2EED8C5D43E37B8 /* Build configuration list for PBXProject "fog-desktop" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = FD6EF6CCC58C87B883B6868C;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 2D0A82D6CE91AA5A42CD5089 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				9C5EC128007C8328E7EDF959 /* fog-desktop_iOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B2E031B8BFAAAD79699BF6F5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7F10B2C9DD36647E05DEFADC /* Assets.xcassets in Resources */,
+				4BDD2E893A5AB63777341ABF /* LaunchScreen.storyboard in Resources */,
+				A41138F3FD10A3C48AB53AFD /* assets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		5061D69345763C86E8AA2928 /* Build Rust Code */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust Code";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a",
+				"$(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "bun tauri ios xcode-script -v --platform \"${PLATFORM_DISPLAY_NAME:?}\" --sdk-root \"${SDKROOT:?}\" --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration \"${CONFIGURATION:?}\" ${FORCE_COLOR} ${ARCHS:?}\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		398E925C8611157DE3A835FB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				460B944A46CA9DF35B3B3092 /* main.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		3322C864A486FF59829EA51A /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = release;
+		};
+		764C8AF8E3A5C6AF024EF116 /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = debug;
+		};
+		CCFA7AF0392BD354C69FAFFA /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "fog-desktop_iOS/fog-desktop_iOS.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = "YP8HMR9NR6";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "fog-desktop_iOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = org.getfog.app;
+				PRODUCT_NAME = "Fog";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALID_ARCHS = arm64;
+			};
+			name = debug;
+		};
+		E04D05C617AF5DCFAFCF4316 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "fog-desktop_iOS/fog-desktop_iOS.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = "YP8HMR9NR6";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "fog-desktop_iOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = org.getfog.app;
+				PRODUCT_NAME = "Fog";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALID_ARCHS = arm64;
+			};
+			name = release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		724747CEE2EED8C5D43E37B8 /* Build configuration list for PBXProject "fog-desktop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				764C8AF8E3A5C6AF024EF116 /* debug */,
+				3322C864A486FF59829EA51A /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+		8BD77B8F7686F39A85CC93CE /* Build configuration list for PBXNativeTarget "fog-desktop_iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CCFA7AF0392BD354C69FAFFA /* debug */,
+				E04D05C617AF5DCFAFCF4316 /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = D3B1672299DA5C88177F0F49 /* Project object */;
+}

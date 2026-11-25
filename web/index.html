@@ -50,7 +50,7 @@
               <span class="text-[15px] text-muted">Free. No email, no phone, no ads.</span>
             </div>
             <p class="mt-5 text-[15px] text-muted">
-              Or <a href="#download" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">download the desktop app</a> for macOS, Windows and Linux.
+              Or <a href="#download" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">get the app</a> for Android, macOS, Windows and Linux. iPhone is coming soon.
             </p>
           </div>
 
@@ -249,11 +249,29 @@ bun web/verify.ts https://getfog.org ./my-build
       <!-- Download: stable file names, so these always point at the newest release. -->
       <section id="download" class="scroll-mt-6 border-t border-line">
         <div class="mx-auto max-w-6xl px-4 py-20 sm:px-6 lg:py-28">
-          <h2 class="max-w-[20ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Fog for your computer.</h2>
+          <h2 class="max-w-[20ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Get the app.</h2>
           <p class="mt-5 max-w-[40rem] text-lg leading-relaxed text-muted">
-            The desktop app ships Fog's code once, at install, instead of loading it on every visit, and keeps itself up to date. Link it to your account with a QR code and your chats come with it.
+            The apps ship Fog's code once, at install, instead of loading it on every visit. Link one to your account with a QR code and your chats come with it.
           </p>
           <ul class="mt-12 divide-y divide-line overflow-hidden rounded-3xl border border-line bg-panel">
+            <li data-os="android" class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:gap-6">
+              <div class="min-w-0 flex-1">
+                <p class="text-lg font-semibold">Android</p>
+                <p class="mt-0.5 text-[15px] text-muted">Android 8 and later. Your phone will ask you to allow installing it the first time.</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-2 sm:flex-row-reverse sm:justify-start">
+                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Android.apk" class="inline-flex h-11 shrink-0 items-center justify-center rounded-full bg-lamp px-5 font-semibold text-lamp-ink transition hover:brightness-105">Download APK</a>
+              </div>
+            </li>
+            <li data-os="ios" class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:gap-6">
+              <div class="min-w-0 flex-1">
+                <p class="text-lg font-semibold">iPhone</p>
+                <p class="mt-0.5 text-[15px] text-muted">iOS 26 and later. A public beta through Apple's TestFlight is on its way.</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-2 sm:flex-row-reverse sm:justify-start">
+                <span class="inline-flex h-11 shrink-0 items-center justify-center rounded-full border border-line px-5 font-semibold text-muted">Coming soon</span>
+              </div>
+            </li>
             <li data-os="mac" class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:gap-6">
               <div class="min-w-0 flex-1">
                 <p class="text-lg font-semibold">macOS</p>
@@ -303,7 +321,7 @@ bun web/verify.ts https://getfog.org ./my-build
             </li>
           </ul>
           <p class="mt-6 max-w-[48rem] text-[15px] leading-relaxed text-muted">
-            Windows builds aren't code-signed yet, so Windows may ask you to confirm the first time you open Fog. Release notes and every past version are on
+            The apps update themselves: the desktop apps in the background, the Android app after asking you. Windows builds aren't code-signed yet, so Windows may ask you to confirm the first time you open Fog. Release notes and every past version are on
             <a href="https://github.com/0xGingi/fog/releases" rel="noopener" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">GitHub</a>.
           </p>
         </div>
@@ -318,7 +336,7 @@ bun web/verify.ts https://getfog.org ./my-build
               Can I use Fog on more than one device?
               <span class="text-2xl leading-none text-muted transition group-open:rotate-45" aria-hidden="true">+</span>
             </summary>
-            <p class="mt-3 leading-relaxed text-muted">Yes. Link up to four more devices, in a browser or the desktop app, by scanning a QR code from the device that has your recovery phrase. Each new device gets your chat history and its own encryption keys, and keeps working when the others are offline. You can unlink any of them at any time.</p>
+            <p class="mt-3 leading-relaxed text-muted">Yes. Link up to four more devices, in a browser, the desktop app or the Android app, by scanning a QR code from the device that has your recovery phrase. Each new device gets your chat history and its own encryption keys, and keeps working when the others are offline. You can unlink any of them at any time.</p>
           </details>
           <details class="group py-5">
             <summary class="flex cursor-pointer list-none items-center justify-between gap-4 text-lg font-semibold">

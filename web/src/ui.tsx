@@ -308,8 +308,8 @@ export function Dialog({ title, children, onClose, actions }: { title: string; c
     return () => window.removeEventListener('keydown', key, true)
   }, [onClose])
   return (
-    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-scrim p-4" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div ref={box} role="dialog" aria-modal aria-label={title} className="pop w-full max-w-sm rounded-3xl bg-panel p-6 shadow-2xl">
+    <div className="fade-in fixed inset-0 bottom-[var(--keyboard-lift)] z-50 grid place-items-center bg-scrim p-4" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div ref={box} role="dialog" aria-modal aria-label={title} className="pop max-h-full w-full max-w-sm overflow-y-auto rounded-3xl bg-panel p-6 shadow-2xl">
         <h2 className="text-lg font-semibold">{title}</h2>
         {children && <div className="mt-2 text-[15px] text-muted">{children}</div>}
         <div className="mt-6 flex justify-end gap-2">{actions}</div>
@@ -339,7 +339,7 @@ export function Drawer({ title, onClose, children, side = 'left', actions }: { t
     <section
       ref={box}
       data-drawer
-      className={`${anim} ${side === 'left' ? 'absolute inset-0' : 'fixed inset-0 md:static md:w-[360px] md:border-l md:border-line'} z-20 flex flex-col bg-panel`}
+      className={`${anim} ${side === 'left' ? 'absolute inset-0' : 'fixed inset-0 bottom-[var(--keyboard-lift)] pt-[env(safe-area-inset-top)] md:static md:w-[360px] md:border-l md:border-line md:pt-0'} z-20 flex flex-col bg-panel`}
       aria-label={title}
     >
       <header className="flex h-16 shrink-0 items-center gap-2 px-3">

@@ -11,8 +11,14 @@ services:
       FOG_TURN_SECRET: ${FOG_TURN_SECRET:?set FOG_TURN_SECRET in .env}
       # Caddy forwards the real client IP; rate limits and signup caps key on it.
       FOG_TRUST_PROXY: "1"
+      # Push notifications for the phone apps (optional, see README). Key files go in ./push/.
+      FOG_APNS_KEY: ${FOG_APNS_KEY:-}
+      FOG_APNS_KEY_ID: ${FOG_APNS_KEY_ID:-}
+      FOG_APNS_TEAM: ${FOG_APNS_TEAM:-}
+      FOG_FCM_ACCOUNT: ${FOG_FCM_ACCOUNT:-}
     volumes:
       - fog-data:/data
+      - ./push:/push:ro
     expose:
       - "8787"
 

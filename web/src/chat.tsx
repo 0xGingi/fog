@@ -64,6 +64,14 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
     if (stick.current) el.scrollTop = el.scrollHeight
     else if (added > 0 && !chat?.messages.at(-1)?.mine) setMissed((n) => n + added)
   }, [count, typing?.until])
+  // The list gets shorter when the keyboard opens: stay on the newest messages if that's where we were.
+  useEffect(() => {
+    const el = scroller.current
+    if (!el) return
+    const ro = new ResizeObserver(() => stick.current && (el.scrollTop = el.scrollHeight))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   // Keep the view steady when older messages are prepended.
   useLayoutEffect(() => {
     const el = scroller.current
@@ -229,7 +237,7 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
         />
       )}
 
-      <div className="fogbank relative min-h-0 flex-1">
+      <div data-slide className="fogbank relative min-h-0 flex-1">
         <div
           ref={scroller}
           onScroll={(e) => {
@@ -329,14 +337,14 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
       {chat.request ? (
         <RequestBar chat={chat} title={title} />
       ) : !chat.group && fog.isBlocked(id) ? (
-        <div className="flex shrink-0 items-center justify-center gap-3 border-t border-line bg-panel px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] text-sm text-muted">
+        <div data-slide className="flex shrink-0 items-center justify-center gap-3 border-t border-line bg-panel px-4 py-3 pb-[max(0.75rem,var(--safe-bottom))] text-sm text-muted">
           You blocked {title}.
           <Button kind="soft" className="h-9 px-3 text-sm" onClick={() => fog.unblock(id)}>
             Unblock
           </Button>
         </div>
       ) : left ? (
-        <div className="flex shrink-0 items-center justify-center gap-3 border-t border-line bg-panel px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] text-sm text-muted">
+        <div data-slide className="flex shrink-0 items-center justify-center gap-3 border-t border-line bg-panel px-4 py-3 pb-[max(0.75rem,var(--safe-bottom))] text-sm text-muted">
           You're no longer a member of this group.
           <Button kind="danger" className="h-9 px-3 text-sm" onClick={() => fog.deleteChat(id)}>
             Delete chat
@@ -452,7 +460,7 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
 function RequestBar({ chat, title }: { chat: Chat; title: string }) {
   const sender = chat.group ? chat.group.owner : chat.id
   return (
-    <div className="shrink-0 border-t border-line bg-panel px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+    <div data-slide className="shrink-0 border-t border-line bg-panel px-4 pt-3 pb-[max(0.75rem,var(--safe-bottom))]">
       <p className="mx-auto max-w-xl text-center text-sm text-muted">
         {chat.group ? `${personName(sender)} added you to “${title}”.` : `${title} wants to message you.`} They won't know you've seen their messages until you accept.
       </p>
@@ -1073,7 +1081,7 @@ function Composer(props: {
   const who = (m: Msg) => (m.mine ? 'yourself' : chat?.group ? personName(m.from ?? '') : title)
 
   return (
-    <div className="shrink-0 border-t border-line/60 bg-panel px-2 pt-2 pb-[max(0.6rem,env(safe-area-inset-bottom))] sm:px-4 lg:px-5">
+    <div data-slide className="shrink-0 border-t border-line/60 bg-panel px-2 pt-2 pb-[max(0.6rem,var(--safe-bottom))] sm:px-4 lg:px-5">
       <div className="relative">
         {bar && !rec && (
           <div key={bar.id + (editing ? 'e' : 'r')} className="rise mb-2 flex items-center gap-3 rounded-xl px-2">

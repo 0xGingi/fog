@@ -284,6 +284,21 @@ if (desktop) {
   })
 }
 
+/**
+ * Phone apps: a push token lets the server wake this device when a message arrives while Fog is closed
+ * or in the background. The push itself only says "New message"; the message comes over the socket.
+ */
+let pushOn = false
+async function registerPush() {
+  const r = (await desktop?.invoke('push_token', { on: state.settings.notifications !== false }).catch(() => null)) as { kind: string; token: string } | null | undefined
+  if (!r) return // desktop and the web: no push (no token on this phone either)
+  await rpc({ t: 'push', kind: r.kind, token: r.token }).catch(() => {})
+  pushOn = !!r.token
+  if (pushOn) rpc({ t: 'away', away: document.hidden }).catch(() => {})
+}
+// In the background the socket may live on for a while, but nobody's looking: ask for pushes.
+document.addEventListener('visibilitychange', () => pushOn && state.conn === 'online' && rpc({ t: 'away', away: document.hidden }).catch(() => {}))
+
 // ---------- theme ----------
 const mq = matchMedia('(prefers-color-scheme: dark)')
 function applyTheme() {
@@ -379,6 +394,7 @@ export function updateSettings(patch: Partial<Settings>) {
   set({ settings: { ...state.settings, ...patch } })
   applyTheme()
   saveMeta()
+  if ('notifications' in patch) registerPush()
 }
 
 /** Update our display name / photo and push it (encrypted) to everyone we've written to. */
@@ -564,6 +580,7 @@ async function onPush(m: any) {
       refreshDevices()
       // Register our access key before anything else goes out (the RPC layer only works once online).
       await rpc({ t: 'access', key: myAk }).catch(() => {})
+      registerPush()
       retryPending()
       if (state.phase === 'app') handleInvite()
       break
@@ -844,6 +861,9 @@ function deliver(peer: string, p: Payload) {
   return serial(async () => {
     const self = peer === acct!.id
     const bytes = pad(te.encode(JSON.stringify(p)))
+    // Worth waking their phone for: messages and incoming calls, not receipts, typing or our own syncs.
+    // (The server learns this one bit per message; Signal sends the same.)
+    const urgent = p.t === 'text' || (p.t === 'call' && p.k === 'offer')
     let ak = self ? undefined : state.people[peer]?.ak
     let akRequest = false
     const targets = () => Array.from(acct!.session_devices(peer)).filter((d) => !(self && d === acct!.device))
@@ -856,7 +876,7 @@ function deliver(peer: string, p: Payload) {
         const c = await senderCert()
         const msgs = devices.map((d) => ({ device: d, body: b64(acct!.seal(peer, d, bytes, c, Date.now())) }))
         await saveAccount()
-        const r = await fetch(`${SERVER.origin}/sealed`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: peer, msgs, access: ak }) })
+        const r = await fetch(`${SERVER.origin}/sealed`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: peer, msgs, access: ak, urgent }) })
         if (r.ok) return
         if (r.status === 409) {
           await fixDevices(peer, await r.json())
@@ -874,7 +894,7 @@ function deliver(peer: string, p: Payload) {
       const msgs = devices.map((d) => ({ device: d, body: b64(acct!.encrypt(peer, d, bytes, Date.now())) }))
       await saveAccount()
       try {
-        await rpc({ t: 'send', to: peer, msgs })
+        await rpc({ t: 'send', to: peer, msgs, urgent })
       } catch (e: any) {
         if (e.message !== 'devices') throw e
         await fixDevices(peer, e.data)
@@ -1085,8 +1105,12 @@ export function addCallRecord(peer: string, call: CallRecord) {
   if (missed && !req) notify(peer, `Missed ${call.video ? 'video' : 'voice'} call`)
 }
 
-/** Invite links: https://host/#add=<account id> opens a chat with that account. */
-export const inviteLink = () => `${SERVER.origin}/#add=${state.me?.id}`
+/**
+ * Invite links: https://host/app/#add=<account id> opens a chat with that account. On phones with
+ * the app installed, /app/ links open the app (see public/.well-known). The id stays in the
+ * fragment, so it never reaches the server. Older links (https://host/#add=...) still work.
+ */
+export const inviteLink = () => `${SERVER.origin}/app/#add=${state.me?.id}`
 async function handleInvite() {
   const m = /^#add=([A-Za-z0-9_-]{43})$/.exec(location.hash)
   if (!m) return
@@ -1730,6 +1754,8 @@ function notify(chat: string, text: string) {
   const body = previews ? text : 'New message'
   if (desktop) {
     // Native notification whenever the window isn't in front (including hidden in the menu bar).
+    // Phones with push in the background: the push already says "New message".
+    if (pushOn && document.hidden) return
     if (state.settings.notifications !== false && !document.hasFocus()) desktop.invoke('notify', { title, body }).catch(() => {})
     return
   }

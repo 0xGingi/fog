@@ -1,0 +1,12 @@
+<!-- The logo's three fog lines, white: Android tints notification icons itself. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="352"
+    android:viewportHeight="352">
+    <group android:translateX="-80" android:translateY="-87">
+        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="40" android:strokeLineCap="round" android:pathData="M132 200c40-22 82-22 124 0s84 22 124 0" />
+        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="40" android:strokeLineCap="round" android:pathData="M100 270c50-26 104-26 156 0s106 26 156 0" />
+        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="40" android:strokeLineCap="round" android:pathData="M148 340c36-18 72-18 108 0s72 18 108 0" />
+    </group>
+</vector>

@@ -7,4 +7,15 @@ web/src/core/
 .env
 web/dist-desktop/
 web/src-tauri/target/
-web/src-tauri/gen/
+web/src-tauri/gen/schemas/
+web/src-tauri/plugin/.tauri/
+web/src-tauri/plugin/android/.tauri/
+web/src-tauri/plugin/ios/.tauri/
+web/src-tauri/plugin/ios/.build/
+# Firebase config for push; CI writes it from a secret.
+web/src-tauri/gen/android/app/google-services.json
+web/src-tauri/plugin/android/build/
+web/src-tauri/plugin/ios/Package.resolved
+web/src-tauri/plugin/permissions/
+# Push notification keys (see README), mounted into the server by compose.yaml.
+/push/

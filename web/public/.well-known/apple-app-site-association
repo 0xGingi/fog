@@ -1,0 +1,13 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["YP8HMR9NR6.org.getfog.app"],
+        "components": [
+          { "/": "/app/*", "#": "add=*", "comment": "Invite links open the iPhone app" },
+          { "/": "/", "#": "add=*", "comment": "Older invite links" }
+        ]
+      }
+    ]
+  }
+}

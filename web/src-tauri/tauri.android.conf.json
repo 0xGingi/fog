@@ -1,0 +1,24 @@
+{
+  "identifier": "org.getfog.app",
+  "bundle": {
+    "android": {
+      "minSdkVersion": 26
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "mobile": [
+        {
+          "scheme": [
+            "https"
+          ],
+          "host": "getfog.org",
+          "pathPrefix": [
+            "/app"
+          ],
+          "appLink": true
+        }
+      ]
+    }
+  }
+}

@@ -2,6 +2,7 @@
 //! It never sees plaintext and holds no secrets. It does see who messages whom (see README: sealed sender).
 
 mod preview;
+mod push;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -78,6 +79,9 @@ struct App {
     trust_root: Vec<u8>,
     server_cert: Vec<u8>,
     server_key: Vec<u8>,
+    /// Push notifications (APNs / FCM), and the queue of devices to wake.
+    pusher: push::Pusher,
+    wakes: mpsc::UnboundedSender<(String, u32)>,
 }
 
 /// Token buckets keyed by e.g. "send:<account>" or "signup:<ip>".
@@ -131,6 +135,8 @@ fn pow_ok(nonce: &str, counter: u64, bits: u32) -> bool {
 struct Online {
     tx: mpsc::UnboundedSender<String>,
     end: tokio_util::sync::CancellationToken,
+    /// A phone app in the background: its socket may linger, but nobody's looking, so push too.
+    away: bool,
 }
 
 struct Link {
@@ -182,7 +188,10 @@ async fn main() {
          CREATE TABLE IF NOT EXISTS server_keys(name TEXT PRIMARY KEY, value BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS devices(
            account TEXT NOT NULL, id INTEGER NOT NULL, keys TEXT, name TEXT, created INTEGER NOT NULL,
-           seen INTEGER NOT NULL, PRIMARY KEY(account, id));",
+           seen INTEGER NOT NULL, PRIMARY KEY(account, id));
+         CREATE TABLE IF NOT EXISTS push_tokens(
+           account TEXT NOT NULL, device INTEGER NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL,
+           PRIMARY KEY(account, device));",
     )
     .expect("migrate");
     migrate_devices(&db);
@@ -192,6 +201,7 @@ async fn main() {
     let _ = db.execute("ALTER TABLE accounts ADD COLUMN access TEXT", []);
     let (trust_root, server_cert, server_key) = sealed_keys(&db, &std::path::Path::new(&db_path).with_file_name("trust-root.key"));
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let (wakes, wake_rx) = mpsc::unbounded_channel();
     let app = Arc::new(App {
         db: Mutex::new(db),
         online: Mutex::default(),
@@ -209,8 +219,11 @@ async fn main() {
         trust_root,
         server_cert,
         server_key,
+        pusher: push::Pusher::from_env(),
+        wakes,
     });
     tokio::spawn(sweep(app.clone()));
+    tokio::spawn(wake_loop(app.clone(), wake_rx));
     let addr = std::env::var("FOG_ADDR").unwrap_or("127.0.0.1:8787".into());
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
     // Logins are bound to the server's name. Without FOG_HOST that name comes from the request's
@@ -237,7 +250,11 @@ async fn main() {
         let assets = Router::new()
             .fallback_service(ServeDir::new(dir.join("assets")))
             .layer(SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable")));
-        router = router.nest("/assets", assets).fallback_service(ServeDir::new(&dir).not_found_service(ServeFile::new(dir.join("index.html"))));
+        // Lets the phone apps open invite links. Apple fetches this extensionless file and wants JSON.
+        let aasa = Router::new()
+            .route_service("/.well-known/apple-app-site-association", ServeFile::new(dir.join(".well-known/apple-app-site-association")))
+            .layer(SetResponseHeaderLayer::overriding(header::CONTENT_TYPE, HeaderValue::from_static("application/json")));
+        router = router.merge(aasa).nest("/assets", assets).fallback_service(ServeDir::new(&dir).not_found_service(ServeFile::new(dir.join("index.html"))));
     }
     let h = |k: &'static str, v: &'static str| SetResponseHeaderLayer::if_not_present(HeaderName::from_static(k), HeaderValue::from_static(v));
     let router = router
@@ -316,6 +333,7 @@ fn remove_device(app: &App, db: &Connection, account: &str, device: u32) -> Resu
     db.execute("DELETE FROM prekeys WHERE account=? AND device=?", params![account, device]).map_err(e)?;
     db.execute("DELETE FROM kyber_prekeys WHERE account=? AND device=?", params![account, device]).map_err(e)?;
     db.execute("DELETE FROM messages WHERE recipient=? AND device=?", params![account, device]).map_err(e)?;
+    db.execute("DELETE FROM push_tokens WHERE account=? AND device=?", params![account, device]).map_err(e)?;
     let key = format!("{account}.{device}");
     if let Some(c) = app.online.lock().unwrap().remove(&key) {
         let _ = c.tx.send(json!({"t": "unlinked"}).to_string());
@@ -483,6 +501,9 @@ struct SealedSend {
     #[serde(default)]
     body: Option<String>,
     access: String,
+    /// A message worth a push notification (not a receipt or typing). See `wake`.
+    #[serde(default)]
+    urgent: bool,
 }
 
 /// Sealed delivery: no login and no sender. Gated by the recipient's access key, which they only
@@ -533,6 +554,9 @@ async fn post_sealed(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(
     };
     for (m, id) in msgs.iter().zip(&ids) {
         push(&app, &req.to, m.device, json!({"t": "msg", "id": id, "from": null, "sealed": true, "body": m.body, "ts": ts}));
+        if req.urgent {
+            wake(&app, &req.to, m.device);
+        }
     }
     (StatusCode::CREATED, axum::Json(json!({"ts": ts}))).into_response()
 }
@@ -831,7 +855,7 @@ async fn conn(app: Shared, mut sock: WebSocket, host: String, ip: IpAddr) -> Res
     // A newer connection for the same device replaces this one.
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let end = tokio_util::sync::CancellationToken::new();
-    if let Some(old) = app.online.lock().unwrap().insert(key.clone(), Online { tx: tx.clone(), end: end.clone() }) {
+    if let Some(old) = app.online.lock().unwrap().insert(key.clone(), Online { tx: tx.clone(), end: end.clone(), away: false }) {
         old.end.cancel();
     }
 
@@ -976,6 +1000,9 @@ enum Req {
         msgs: Vec<DeviceMsg>,
         #[serde(default)]
         body: Option<String>,
+        /// Worth a push notification (a message or a call, not a receipt or typing).
+        #[serde(default)]
+        urgent: bool,
     },
     Ack { id: i64 },
     /// Reserve a one-time slot to upload an encrypted attachment of at most `size` bytes.
@@ -996,6 +1023,11 @@ enum Req {
     Provision { channel: String, body: String },
     /// Main device: remove any linked device. Linked devices: remove themselves.
     Unlink { device: u32 },
+    /// Phone apps: where to send push notifications for this device ("apns", "apns-dev" or "fcm";
+    /// an empty token turns them off).
+    Push { kind: String, token: String },
+    /// Phone apps: the app went to the background (or came back).
+    Away { away: bool },
 }
 
 #[derive(Deserialize)]
@@ -1033,6 +1065,8 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
         Req::Cert => ("cert", 0.1, 10.0),
         Req::Access { .. } => ("access", 0.1, 10.0),
         Req::Ack { .. } => ("ack", 50.0, 2000.0),
+        Req::Push { .. } => ("push", 0.2, 10.0),
+        Req::Away { .. } => ("away", 1.0, 60.0),
     };
     if !app.limits.allow(&format!("{bucket}:{me}"), rate, burst) {
         return json!({"rid": rpc.rid, "error": "slow_down"});
@@ -1057,12 +1091,18 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
         }
     }
     let mut out = match rpc.req {
-        Req::Send { to, msgs, body } => {
+        Req::Send { to, msgs, body, urgent } => {
             let msgs = match body {
                 Some(body) if msgs.is_empty() => vec![DeviceMsg { device: MAIN_DEVICE, body }],
                 _ => msgs,
             };
-            send_msg(app, cx, &to, &msgs)
+            send_msg(app, cx, &to, &msgs, urgent)
+        }
+        Req::Away { away } => {
+            if let Some(c) = app.online.lock().unwrap().get_mut(&format!("{me}.{}", cx.device)) {
+                c.away = away;
+            }
+            Ok(json!({}))
         }
         Req::Ice => Ok(ice(app, me, cx.host)),
         Req::Provision { channel, body } => {
@@ -1299,7 +1339,20 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
             db.execute("UPDATE accounts SET access=? WHERE id=?", params![key, me]).map_err(e)?;
             Ok(json!({}))
         }
-        Req::Send { .. } | Req::Ice | Req::Cert | Req::Provision { .. } => unreachable!("handled in handle()"),
+        Req::Push { kind, token } => {
+            if token.is_empty() {
+                db.execute("DELETE FROM push_tokens WHERE account=? AND device=?", params![me, cx.device]).map_err(e)?;
+                return Ok(json!({}));
+            }
+            if !push::valid_token(&kind, &token) {
+                return Err("bad token".into());
+            }
+            // A token belongs to one install: if it moved (a reinstall that kept it), the old row goes.
+            db.execute("DELETE FROM push_tokens WHERE kind=? AND token=?", params![kind, token]).map_err(e)?;
+            db.execute("INSERT OR REPLACE INTO push_tokens(account, device, kind, token) VALUES(?, ?, ?, ?)", params![me, cx.device, kind, token]).map_err(e)?;
+            Ok(json!({}))
+        }
+        Req::Send { .. } | Req::Ice | Req::Cert | Req::Provision { .. } | Req::Away { .. } => unreachable!("handled in handle()"),
     }
 }
 
@@ -1355,7 +1408,7 @@ fn queue_full(db: &Connection, to: &str) -> bool {
         .map_or(true, |(n, bytes)| n >= MAX_QUEUED_PER_RECIPIENT || bytes >= MAX_QUEUED_BYTES)
 }
 
-fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg]) -> Result<Value, String> {
+fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg], urgent: bool) -> Result<Value, String> {
     if msgs.iter().any(|m| m.body.len() > MAX_BODY) {
         return Err("too_large".into());
     }
@@ -1387,6 +1440,9 @@ fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg]) -> Result<Value, 
     };
     for (m, id) in msgs.iter().zip(&ids) {
         push(app, to, m.device, json!({"t": "msg", "id": id, "from": me, "dev": cx.device, "body": m.body, "ts": ts}));
+        if urgent {
+            wake(app, to, m.device);
+        }
     }
     Ok(json!({"ts": ts}))
 }
@@ -1394,6 +1450,29 @@ fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg]) -> Result<Value, 
 fn push(app: &App, to: &str, device: u32, v: Value) {
     if let Some(c) = app.online.lock().unwrap().get(&format!("{to}.{device}")) {
         let _ = c.tx.send(v.to_string());
+    }
+}
+
+/// A message or call for a device that isn't looking (offline, or a phone app in the background):
+/// if it's a phone with push turned on, wake it. Senders mark what's urgent, so receipts and typing
+/// don't buzz anyone; at most one push every 30 seconds per device (each replaces the last anyway).
+fn wake(app: &App, to: &str, device: u32) {
+    let away = app.online.lock().unwrap().get(&format!("{to}.{device}")).is_none_or(|c| c.away);
+    if away && app.pusher.enabled() && app.limits.allow(&format!("wake:{to}.{device}"), 1.0 / 30.0, 2.0) {
+        let _ = app.wakes.send((to.to_owned(), device));
+    }
+}
+
+async fn wake_loop(app: Shared, mut rx: mpsc::UnboundedReceiver<(String, u32)>) {
+    while let Some((account, device)) = rx.recv().await {
+        let token = app.db.lock().unwrap().query_row("SELECT kind, token FROM push_tokens WHERE account=? AND device=?", params![account, device], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional().ok().flatten();
+        let Some((kind, token)) = token else { continue };
+        let app = app.clone();
+        tokio::spawn(async move {
+            if app.pusher.wake(&kind, &token).await.is_err() {
+                let _ = app.db.lock().unwrap().execute("DELETE FROM push_tokens WHERE kind=? AND token=?", params![kind, token]);
+            }
+        });
     }
 }
 

@@ -52,6 +52,7 @@ Fog is a self-hostable, end-to-end encrypted messenger built on Signal's Rust `l
 | **Attachments** | Any file up to 100 MB, padded to ~5% size buckets (Signal's scheme) and encrypted client-side with a fresh **AES-256-GCM** key per file. Only ciphertext is uploaded; the blob ID and key travel inside the Signal message. Non-inline MIME types are served as `application/octet-stream` so attached `.html` or `.svg` files cannot run script on the app origin. |
 | **Groups** | Encrypted pairwise to every member so the server sees ordinary 1:1 traffic and learns nothing about group membership. Group state (members, name, photo) is versioned and XEdDSA-signed by the owner; clients detect and warn on owner equivocation (forked member lists). |
 | **Voice & Video Calls** | WebRTC DTLS-SRTP media encryption with SDP offers/answers (including DTLS fingerprints) carried inside the Signal session so the server cannot MITM keys. Self-hosted STUN/TURN means no third-party STUN provider learns who is calling; enabling **Relay all calls** hides your IP from peers. |
+| **Push Notifications** | Phone apps only. When a message or call arrives while Fog is closed or in the background, the server sends a push through Apple (APNs) or Google (FCM) that says only "New message": no sender, chat or content, which still travel only over the encrypted connection once Fog opens. Senders mark which messages are worth a push (messages and incoming calls, not receipts or typing), so the server learns that one bit about sealed messages, as in Signal. Apple or Google learn that your device got something, and when. Turn notifications off in Settings and the token is deleted from the server. |
 | **Link Previews** | **Off by default** in Privacy settings. When enabled, fetched by the sender's Fog server with SSRF hardening (public IPs only, DNS-pinned resolution, re-checked redirects, 512 KB / 6 s limits) and embedded inside the encrypted message so recipients never contact the target site. |
 | **App Lock (At Rest)** | Optional encryption of all local IndexedDB data (keys, chats, cached attachments) under a random AES-256-GCM data key wrapped by your passcode (**Argon2id**, 64 MiB / 3 passes) and/or a **WebAuthn PRF passkey** (HKDF-SHA256). Auto-lock reloads the page to clear all keys from memory. |
 | **Web Hardening** | Strict Content Security Policy (as a header and in the page), reproducible builds you can check against the live site (see [Verifying the web app](#verifying-the-web-app)), a desktop app that ships the client instead of downloading it each visit, self-hosted fonts (zero third-party requests), single-tab key ownership via Web Locks, and atomic persistence of ratchet state before acknowledging messages. |
@@ -103,6 +104,43 @@ The crypto core is compiled to WebAssembly once and shared by every platform bui
 Windows builds are unsigned for now, so SmartScreen warns on first run until a code-signing certificate is added.
 
 **Auto-updates.** The desktop app checks for a newer release at launch and every 6 hours, installs it in the background, and offers to restart. Updates are signed: each release publishes `latest.json` (from `uploadUpdaterJson`) and the app only installs files whose signature matches the public key in [`tauri.conf.json`](web/src-tauri/tauri.conf.json). Checking happens in the app's Rust layer, so the web page still has no native access. The private key lives in the `TAURI_SIGNING_PRIVATE_KEY` repository secret. **Keep a backup of it**: without it you can't ship updates to existing installs. Linux updates apply to the AppImage; `.deb`/`.rpm` installs update through a new download.
+
+## Mobile Apps
+
+The same client also builds for **Android** (an APK attached to every release as `Fog-Android.apk`) and **iOS** (uploaded to TestFlight), from [`web/src-tauri`](web/src-tauri) with Tauri 2. The phone apps use their own bundle ID, `org.getfog.app`.
+
+**Build locally:**
+
+```sh
+cd web && bun install && bun run core
+bunx tauri android build --apk     # needs Java 17, the Android SDK and NDK (NDK_HOME)
+bunx tauri ios build               # needs Xcode
+```
+
+**Notifications** come through Apple's and Google's push services when the server is configured for them (see [Push notifications](#push-notifications)). A push says only "New message"; open Fog to see what it is. Android needs Google Play services for push; without them Fog notifies only while it's open.
+
+**Updates.** iPhones update through TestFlight. The Android app checks the latest release at launch and offers to download and install a newer APK; Android installs it only if it's signed with the same key as the installed app.
+
+**Not there yet:** passkey unlock isn't available in the phone apps (passcode lock works). Muted chats still get the generic "New message" push, since the server can't know which chat a message belongs to.
+
+**Release secrets.** The release workflow builds the phone apps when these repository secrets exist:
+
+| Secret | What it is |
+| --- | --- |
+| `FOG_ANDROID_KEYSTORE_B64`, `FOG_ANDROID_KEYSTORE_PASSWORD` | Android signing keystore (base64) and its password. **Keep a backup**: Android only installs updates signed with the same key. |
+| `IOS_CERTIFICATE`, `IOS_CERTIFICATE_PASSWORD` | Apple Distribution certificate (`.p12`, base64) and its password |
+| `IOS_MOBILE_PROVISION` | App Store provisioning profile for `org.getfog.app` (base64) |
+| `APPSTORE_API_KEY_ID`, `APPSTORE_API_ISSUER_ID`, `APPSTORE_API_KEY` | App Store Connect API key (Key ID, Issuer ID, contents of the `.p8`), for uploading to TestFlight |
+| `GOOGLE_SERVICES_JSON` | The Firebase project's `google-services.json` for `org.getfog.app` (Android push). Optional: without it the APK can't get pushes. |
+
+### Push notifications
+
+The phone apps register a push token with the server; the server needs credentials to use them. Both are optional, and each platform works on its own.
+
+- **Apple:** in the developer portal, Keys &rarr; **+** &rarr; *Apple Push Notifications service (APNs)*. Download the `.p8`, then set `FOG_APNS_KEY` (path to it), `FOG_APNS_KEY_ID` and `FOG_APNS_TEAM`. The App ID needs the Push Notifications capability.
+- **Google:** create a Firebase project and add an Android app with package `org.getfog.app`. Its `google-services.json` goes in the `GOOGLE_SERVICES_JSON` secret (the app side). For the server, Project settings &rarr; Service accounts &rarr; *Generate new private key*, and point `FOG_FCM_ACCOUNT` at that file.
+
+With Docker Compose, put the key files in `./push/` next to `compose.yaml` (it's mounted at `/push`) and set the variables in `.env`, e.g. `FOG_APNS_KEY=/push/AuthKey_XXXXXXXXXX.p8`.
 
 ## Architecture
 
@@ -241,6 +279,9 @@ Every file must match. `index.html` names each script by its content hash, so a 
 | `FOG_POW_BITS` | `20` | Leading zero bits required for signup proof-of-work. |
 | `FOG_SIGNUP_BURST` | `10` | New accounts allowed per IP in a burst (refills at 1/min). |
 | `FOG_CORS_ORIGINS` | `tauri://localhost,http://tauri.localhost` | Comma-separated origins allowed to call `/blob` and `/sealed` cross-origin (the desktop app). |
+| `FOG_APNS_KEY`, `FOG_APNS_KEY_ID`, `FOG_APNS_TEAM` | *(unset)* | iPhone push: path to the APNs `.p8` key, its Key ID, and your Apple team ID. See [Push notifications](#push-notifications). |
+| `FOG_APNS_TOPIC` | `org.getfog.app` | The iOS app's bundle ID. |
+| `FOG_FCM_ACCOUNT` | *(unset)* | Android push: path to the Firebase service account `.json`. |
 
 ## Roadmap
 

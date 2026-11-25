@@ -555,10 +555,35 @@ function UsernameStep() {
 const lastTs = (c: Chat) => c.messages.at(-1)?.ts ?? 0
 const sortedChats = (chats: Record<string, Chat>) => Object.values(chats).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || lastTs(b) - lastTs(a))
 
+/**
+ * Phone back button / gesture (and the browser's Back on a phone): close whatever is on top (a menu,
+ * dialog or panel), then the open chat, then leave. Works by keeping one history entry of our own
+ * and putting it back after each step.
+ */
+function useBackButton() {
+  useEffect(() => {
+    if (!matchMedia('(max-width: 767px)').matches) return
+    history.pushState({ fog: 1 }, '')
+    const onPop = () => {
+      if (document.querySelector('[role=menu],[role=dialog],[data-drawer]')) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+        history.pushState({ fog: 1 }, '')
+      } else if (fog.getState().active) {
+        fog.openChat(null)
+        history.pushState({ fog: 1 }, '')
+      }
+      // Nothing left to close: don't re-arm, so the next Back leaves the app as usual.
+    }
+    addEventListener('popstate', onPop)
+    return () => removeEventListener('popstate', onPop)
+  }, [])
+}
+
 function Main() {
   const active = useFog((s) => s.active)
   const lockPrompted = useFog((s) => s.settings.lockPrompted)
   const [protect, setProtect] = useState<'ask' | 'set' | null>(null)
+  useBackButton()
   useEffect(() => {
     if (!lockPrompted) db.lockEnabled().then((on) => (on ? fog.updateSettings({ lockPrompted: true }) : setProtect('ask')))
   }, [])
@@ -593,7 +618,7 @@ function Main() {
   }, [])
   useEffect(() => setInfo(false), [active])
   return (
-    <div className="flex h-full overflow-hidden bg-panel">
+    <div className="flex h-full overflow-hidden bg-panel pt-[env(safe-area-inset-top)]">
       <aside
         ref={aside}
         style={{ '--sb': `${rail ? RAIL : (dragW ?? width)}px` } as React.CSSProperties}
@@ -632,7 +657,7 @@ function Main() {
             </>
           }
         >
-          Your keys and messages are stored on this device. With a passcode (or Touch ID / Face ID), they're encrypted so nobody with access to this computer or browser can read them. You can change this later in Settings.
+          Your keys and messages are stored on this device. With a passcode{fog.isDesktop ? '' : ' (or Touch ID / Face ID)'}, they're encrypted so nobody with access to this device can read them.{' '}You can change this later in Settings.
         </Dialog>
       )}
       {protect === 'set' && <AppLockDialog onClose={() => setProtect(null)} />}
@@ -717,7 +742,7 @@ function Sidebar({
           onClick={onNew}
           aria-label="New chat"
           title="New chat"
-          className="absolute bottom-[max(1.25rem,env(safe-area-inset-bottom))] left-1/2 grid size-12 -translate-x-1/2 place-items-center rounded-full bg-lamp text-lamp-ink shadow-lg shadow-black/25 transition hover:scale-105 active:scale-95"
+          className="absolute bottom-[max(1.25rem,var(--safe-bottom))] left-1/2 grid size-12 -translate-x-1/2 place-items-center rounded-full bg-lamp text-lamp-ink shadow-lg shadow-black/25 transition hover:scale-105 active:scale-95"
         >
           <Icon name="pencil" className="size-5" />
         </button>
@@ -829,7 +854,7 @@ function Sidebar({
         onClick={onNew}
         aria-label="New chat"
         title="New chat"
-        className="absolute right-5 bottom-[max(1.25rem,env(safe-area-inset-bottom))] grid size-14 place-items-center rounded-full bg-lamp text-lamp-ink shadow-lg shadow-black/25 transition hover:scale-105 active:scale-95"
+        className="absolute right-5 bottom-[max(1.25rem,var(--safe-bottom))] grid size-14 place-items-center rounded-full bg-lamp text-lamp-ink shadow-lg shadow-black/25 transition hover:scale-105 active:scale-95"
       >
         <Icon name="pencil" />
       </button>
@@ -1423,6 +1448,7 @@ function LinkDeviceDialog({ onClose }: { onClose: () => void }) {
   const [step, setStep] = useState<'scan' | 'confirm' | 'sending' | 'waiting' | 'done'>('scan')
   const [err, setErr] = useState<string | null>(null)
   const [paste, setPaste] = useState('')
+  const [typing, setTyping] = useState(false)
   const [pending, setPending] = useState('')
   const [check, setCheck] = useState('')
   const scanned = async (code: string): Promise<string | null> => {
@@ -1480,7 +1506,9 @@ function LinkDeviceDialog({ onClose }: { onClose: () => void }) {
       {step === 'scan' && (
         <>
           <p>On the new device, choose “Link to an existing account” and scan the code it shows.</p>
-          {canScan && <QrScanner onCode={scanned} />}
+          {/* Typing the code instead: the camera makes way for the keyboard (and stays away while
+              there's a code in the box, so the Link button doesn't jump as the keyboard closes). */}
+          {canScan && !typing && !paste && <QrScanner onCode={scanned} />}
           <form
             className="mt-4 flex gap-2"
             onSubmit={(e) => {
@@ -1491,9 +1519,11 @@ function LinkDeviceDialog({ onClose }: { onClose: () => void }) {
             <input
               value={paste}
               onChange={(e) => setPaste(e.target.value)}
+              onFocus={() => setTyping(true)}
+              onBlur={() => setTyping(false)}
               placeholder={canScan ? 'Or paste the code' : 'Paste the code from the new device'}
               aria-label="Link code"
-              className="min-w-0 flex-1 rounded-xl border border-line bg-raised px-3 py-2 text-[15px] text-ink outline-none focus:border-lamp"
+              className="min-w-0 flex-1 rounded-xl border border-line bg-raised px-3 py-2 text-base text-ink outline-none focus:border-lamp"
             />
             <Button disabled={!paste.trim()} className="h-10 px-4">
               Link
@@ -1670,7 +1700,8 @@ function NewChat({ onClose, onGroup }: { onClose: () => void; onGroup: () => voi
   )
 }
 
-const canScan = typeof window !== 'undefined' && 'BarcodeDetector' in window
+// Any device with a camera. (Browsers without a built-in QR reader, like iPhones, load a decoder.)
+const canScan = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia
 
 /** Your account as a QR code + invite link. The link only contains your public account id. */
 function ShareDialog({ onClose }: { onClose: () => void }) {
@@ -1722,17 +1753,16 @@ function QrScanner({ onCode, hint = 'Point your camera at the code.' }: { onCode
   useEffect(() => {
     let stream: MediaStream | undefined
     let stop = false
-    const detector = new (window as any).BarcodeDetector({ formats: ['qr_code'] })
     ;(async () => {
       try {
+        const detect = await qrReader()
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
         if (stop) return stream.getTracks().forEach((t) => t.stop())
         video.current!.srcObject = stream
         await video.current!.play()
         let last = ''
         while (!stop) {
-          const codes = await detector.detect(video.current).catch(() => [])
-          const raw = codes[0]?.rawValue
+          const raw = await detect(video.current!).catch(() => null)
           if (raw && raw !== last) {
             last = raw
             const e = await onCode(raw)
@@ -1759,6 +1789,29 @@ function QrScanner({ onCode, hint = 'Point your camera at the code.' }: { onCode
       <p className={`mt-3 text-center text-sm ${err ? 'text-danger' : ''}`}>{err ?? hint}</p>
     </>
   )
+}
+
+/**
+ * Read a QR code from the camera. Chrome and Android have a built-in reader; iPhones, Safari and
+ * Firefox don't, so they get jsQR, loaded only then.
+ */
+async function qrReader(): Promise<(v: HTMLVideoElement) => Promise<string | null>> {
+  if ('BarcodeDetector' in window) {
+    const d = new (window as any).BarcodeDetector({ formats: ['qr_code'] })
+    return async (v) => (await d.detect(v))[0]?.rawValue ?? null
+  }
+  const { default: jsQR } = await import('jsqr')
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!
+  return async (v) => {
+    if (!v.videoWidth) return null
+    // A smaller frame decodes faster and is plenty for a code filling the frame.
+    const scale = Math.min(1, 640 / v.videoWidth)
+    canvas.width = Math.round(v.videoWidth * scale)
+    canvas.height = Math.round(v.videoHeight * scale)
+    ctx.drawImage(v, 0, 0, canvas.width, canvas.height)
+    return jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height)?.data || null
+  }
 }
 
 /** Pick people: your existing contacts plus anyone found by username or account id. */
