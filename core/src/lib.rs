@@ -14,8 +14,14 @@ use libsignal_protocol::*;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-const DEVICE: u8 = 1; // ponytail: single device per account; multi-device adds device ids here and on the server
+/// The main device (the one holding the recovery phrase) is always device 1; linked devices get 2..=MAX.
+const MAIN_DEVICE: u32 = 1;
 const ID_INFO: &[u8] = b"fog/identity/v1";
+/// Main-device key: also derived from the phrase, never given to linked devices. The server only
+/// lets device 1 log in (and link or unlink devices) with a signature from it.
+const MAIN_INFO: &[u8] = b"fog/main-device/v1";
+/// Saved-state format marker. State saved before multi-device has no prefix (and is device 1).
+const STATE_V2: &[u8] = b"\xF0FG2";
 
 type R<T> = std::result::Result<T, Error>;
 type LResult<T> = std::result::Result<T, SignalProtocolError>;
@@ -43,8 +49,38 @@ fn time(ms: f64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_millis(ms as u64)
 }
 
-fn addr(id: &str) -> ProtocolAddress {
-    ProtocolAddress::new(id.to_owned(), DeviceId::new(DEVICE).expect("valid device id"))
+fn device_id(device: u32) -> R<DeviceId> {
+    DeviceId::try_from(device).map_err(|_| err("bad device id"))
+}
+
+fn addr(id: &str, device: u32) -> R<ProtocolAddress> {
+    Ok(ProtocolAddress::new(id.to_owned(), device_id(device)?))
+}
+
+/// Phrase -> 32-byte seed for one purpose (identity, main-device key).
+fn phrase_seed(phrase: &str, info: &[u8]) -> R<(bip39::Mnemonic, [u8; 32])> {
+    let m = bip39::Mnemonic::parse_normalized(phrase.trim()).map_err(err)?;
+    let mut seed = [0u8; 32];
+    hkdf::Hkdf::<sha2::Sha256>::new(None, &m.to_seed("")).expand(info, &mut seed).map_err(err)?;
+    Ok((m, seed))
+}
+
+/// Linking: a throwaway X25519 key pair for the new device, as 32-byte private ++ 32-byte public.
+#[wasm_bindgen]
+pub fn link_keypair() -> Vec<u8> {
+    let kp = KeyPair::generate(&mut rand::rng());
+    let mut out = kp.private_key.serialize().to_vec();
+    out.extend_from_slice(kp.public_key.public_key_bytes());
+    out
+}
+
+/// Linking: X25519 shared secret between our private key and their 32-byte public key.
+/// (The caller runs it through HKDF before using it as a key.)
+#[wasm_bindgen]
+pub fn link_agree(private: &[u8], their_public: &[u8]) -> R<Vec<u8>> {
+    let private = PrivateKey::deserialize(private).map_err(err)?;
+    let public = PublicKey::from_djb_public_key_bytes(their_public).map_err(err)?;
+    Ok(private.calculate_agreement(&public).map_err(err)?.into())
 }
 
 /// Our stores are in memory, so libsignal's async calls resolve on first poll.
@@ -114,6 +150,7 @@ pub fn valid_mnemonic(phrase: &str) -> bool {
 /// One field per libsignal store trait, so each can be borrowed `&mut` independently.
 #[derive(Serialize, Deserialize)]
 struct State {
+    /// Empty on linked devices: they get the identity key, never the recovery phrase.
     phrase: String,
     next_pk: u32,
     /// Next id for rotated signed + last-resort Kyber prekeys, and for one-time Kyber prekeys.
@@ -145,8 +182,13 @@ struct Kyber {
     #[serde(default)]
     last_resort: BTreeSet<u32>,
 }
+/// Keyed "<account id>.<device>".
 #[derive(Serialize, Deserialize, Default)]
 struct Sessions(BTreeMap<String, Vec<u8>>);
+
+fn session_key(id: &str, device: u32) -> String {
+    format!("{id}.{device}")
+}
 
 #[derive(Serialize, Deserialize)]
 struct SignedKey {
@@ -181,6 +223,10 @@ struct Keys {
 pub struct Account {
     st: State,
     id: String,
+    device: u32,
+    /// Linked devices: this device's own login key (the identity key is shared by every device, so it
+    /// can't tell them apart). Empty on the main device, which proves the main-device key instead.
+    device_key: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -188,13 +234,26 @@ impl Account {
     /// Create (or restore) an account from a recovery phrase. Prekeys are fresh every time:
     /// a restored device starts new sessions while the identity stays the same.
     pub fn create(phrase: &str, now_ms: f64) -> R<Account> {
-        let m = bip39::Mnemonic::parse_normalized(phrase.trim()).map_err(err)?;
-        let mut seed = [0u8; 32];
-        hkdf::Hkdf::<sha2::Sha256>::new(None, &m.to_seed(""))
-            .expand(ID_INFO, &mut seed)
-            .map_err(err)?;
+        let (m, seed) = phrase_seed(phrase, ID_INFO)?;
         let private = PrivateKey::deserialize(&seed).map_err(err)?;
         let pair = IdentityKeyPair::new(IdentityKey::new(private.public_key().map_err(err)?), private);
+        Account::new(m.to_string(), pair, MAIN_DEVICE, now_ms)
+    }
+
+    /// A linked device: the identity key arrives from the main device (see `link_identity`).
+    pub fn create_linked(identity: &[u8], device: u32, now_ms: f64) -> R<Account> {
+        if device == MAIN_DEVICE {
+            return Err(err("linked devices can't be device 1"));
+        }
+        device_id(device)?;
+        let pair = IdentityKeyPair::try_from(identity).map_err(err)?;
+        let mut acct = Account::new(String::new(), pair, device, now_ms)?;
+        acct.device_key = KeyPair::generate(&mut rand::rng()).private_key.serialize().to_vec();
+        Ok(acct)
+    }
+
+    fn new(phrase: String, pair: IdentityKeyPair, device: u32, now_ms: f64) -> R<Account> {
+        let private = *pair.private_key();
         let rng = &mut rand::rng();
 
         let spk = KeyPair::generate(rng);
@@ -204,7 +263,7 @@ impl Account {
         let ts = Timestamp::from_epoch_millis(now_ms as u64);
 
         let mut st = State {
-            phrase: m.to_string(),
+            phrase,
             next_pk: 1,
             next_signed: 2,
             next_kpk: 100_000,
@@ -217,14 +276,26 @@ impl Account {
         st.signed.0.insert(1, SignedPreKeyRecord::new(1.into(), ts, &spk, &spk_sig).serialize().map_err(err)?);
         st.kyber.keys.insert(1, KyberPreKeyRecord::new(1.into(), ts, &kpk, &kpk_sig).serialize().map_err(err)?);
         st.kyber.last_resort.insert(1);
-        Account::from_state(st)
+        Account::from_state(st, device)
     }
 
     pub fn load(bytes: &[u8]) -> R<Account> {
-        Account::from_state(postcard::from_bytes(bytes).map_err(err)?)
+        match bytes.strip_prefix(STATE_V2) {
+            Some(rest) => {
+                let (device, device_key, st): (u32, Vec<u8>, State) = postcard::from_bytes(rest).map_err(err)?;
+                let mut acct = Account::from_state(st, device)?;
+                acct.device_key = device_key;
+                Ok(acct)
+            }
+            None => Account::from_state(postcard::from_bytes(bytes).map_err(err)?, MAIN_DEVICE),
+        }
     }
 
-    fn from_state(mut st: State) -> R<Account> {
+    fn from_state(mut st: State, device: u32) -> R<Account> {
+        // Sessions saved before multi-device are keyed by account id alone: they're with device 1.
+        if st.sessions.0.keys().any(|k| !k.contains('.')) {
+            st.sessions.0 = std::mem::take(&mut st.sessions.0).into_iter().map(|(k, v)| if k.contains('.') { (k, v) } else { (session_key(&k, MAIN_DEVICE), v) }).collect();
+        }
         // State saved before one-time Kyber keys existed: everything it holds is last-resort.
         if st.kyber.last_resort.is_empty() {
             st.kyber.last_resort = st.kyber.keys.keys().copied().collect();
@@ -237,7 +308,8 @@ impl Account {
         }
         let pair = IdentityKeyPair::try_from(&st.ids.pair[..]).map_err(err)?;
         let id = B64URL.encode(pair.public_key().public_key_bytes());
-        Ok(Account { st, id })
+        device_id(device)?;
+        Ok(Account { st, id, device, device_key: vec![] })
     }
 
     fn pair(&self) -> IdentityKeyPair {
@@ -246,7 +318,9 @@ impl Account {
 
     /// Serialized state. Persist after every mutating call, before acking anything to the server.
     pub fn save(&self) -> Vec<u8> {
-        postcard::to_allocvec(&self.st).expect("state serializes")
+        let mut out = STATE_V2.to_vec();
+        out.extend(postcard::to_allocvec(&(self.device, &self.device_key, &self.st)).expect("state serializes"));
+        out
     }
 
     #[wasm_bindgen(getter)]
@@ -254,9 +328,58 @@ impl Account {
         self.id.clone()
     }
 
+    /// The recovery phrase. Empty on linked devices.
     #[wasm_bindgen(getter)]
     pub fn phrase(&self) -> String {
         self.st.phrase.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn device(&self) -> u32 {
+        self.device
+    }
+
+    /// The main device holds the recovery phrase; only it can link and unlink devices.
+    #[wasm_bindgen(getter)]
+    pub fn is_main(&self) -> bool {
+        !self.st.phrase.is_empty()
+    }
+
+    fn main_key(&self) -> R<PrivateKey> {
+        if !self.is_main() {
+            return Err(err("only the main device has this key"));
+        }
+        PrivateKey::deserialize(&phrase_seed(&self.st.phrase, MAIN_INFO)?.1).map_err(err)
+    }
+
+    /// Public half of the main-device key (base64url, same format as an account id).
+    pub fn main_public(&self) -> R<String> {
+        Ok(B64URL.encode(self.main_key()?.public_key().map_err(err)?.public_key_bytes()))
+    }
+
+    /// XEdDSA signature with the main-device key (device-1 login).
+    pub fn main_sign(&self, msg: &[u8]) -> R<Vec<u8>> {
+        Ok(self.main_key()?.calculate_signature(msg, &mut rand::rng()).map_err(err)?.into())
+    }
+
+    fn device_private(&self) -> R<PrivateKey> {
+        PrivateKey::deserialize(&self.device_key).map_err(|_| err("only linked devices have a device key"))
+    }
+
+    /// Linked devices: public half of this device's login key (base64url).
+    pub fn device_public(&self) -> R<String> {
+        Ok(B64URL.encode(self.device_private()?.public_key().map_err(err)?.public_key_bytes()))
+    }
+
+    /// Linked devices: XEdDSA signature with this device's login key.
+    pub fn device_sign(&self, msg: &[u8]) -> R<Vec<u8>> {
+        Ok(self.device_private()?.calculate_signature(msg, &mut rand::rng()).map_err(err)?.into())
+    }
+
+    /// The identity key pair, for handing to a device being linked (end-to-end encrypted). Main only.
+    pub fn link_identity(&self) -> R<Vec<u8>> {
+        self.main_key()?;
+        Ok(self.st.ids.pair.clone())
     }
 
     /// Unused one-time prekeys still held locally.
@@ -354,13 +477,24 @@ impl Account {
         (self.st.kyber.keys.len() - self.st.kyber.last_resort.len()) as u32
     }
 
-    pub fn has_session(&self, peer: &str) -> bool {
-        self.st.sessions.0.contains_key(peer)
+    pub fn has_session(&self, peer: &str, device: u32) -> bool {
+        self.st.sessions.0.contains_key(&session_key(peer, device))
+    }
+
+    /// Devices of `peer` we have sessions with.
+    pub fn session_devices(&self, peer: &str) -> Vec<u32> {
+        let prefix = format!("{peer}.");
+        self.st.sessions.0.keys().filter_map(|k| k.strip_prefix(&prefix)?.parse().ok()).collect()
+    }
+
+    /// Forget a session (the peer unlinked that device).
+    pub fn drop_session(&mut self, peer: &str, device: u32) {
+        self.st.sessions.0.remove(&session_key(peer, device));
     }
 
     /// PQXDH from a peer's prekey bundle (JSON from the server). libsignal verifies the bundle
     /// signatures against the identity implied by `peer`, so a server-substituted bundle fails.
-    pub fn start_session(&mut self, peer: &str, bundle: &str, now_ms: f64) -> R<()> {
+    pub fn start_session(&mut self, peer: &str, device: u32, bundle: &str, now_ms: f64) -> R<()> {
         let b: Keys = serde_json::from_str(bundle).map_err(err)?;
         let dec = |s: &str| B64.decode(s).map_err(err);
         let pk = match &b.pk {
@@ -369,7 +503,7 @@ impl Account {
         };
         let bundle = PreKeyBundle::new(
             b.reg,
-            DeviceId::new(DEVICE).map_err(err)?,
+            device_id(device)?,
             pk,
             b.spk.id.into(),
             PublicKey::deserialize(&dec(&b.spk.key)?).map_err(err)?,
@@ -380,15 +514,15 @@ impl Account {
             id_key(peer).map_err(err)?,
         )
         .map_err(err)?;
-        let (me, them) = (addr(&self.id), addr(peer));
+        let (me, them) = (addr(&self.id, self.device)?, addr(peer, device)?);
         let st = &mut self.st;
         sync(process_prekey_bundle(&them, &me, &mut st.sessions, &mut st.ids, &bundle, time(now_ms), &mut rand::rng()))
             .map_err(err)
     }
 
     /// Encrypt to a peer with an existing session. Output: [message type byte] ++ ciphertext.
-    pub fn encrypt(&mut self, peer: &str, plaintext: &[u8], now_ms: f64) -> R<Vec<u8>> {
-        let (me, them) = (addr(&self.id), addr(peer));
+    pub fn encrypt(&mut self, peer: &str, device: u32, plaintext: &[u8], now_ms: f64) -> R<Vec<u8>> {
+        let (me, them) = (addr(&self.id, self.device)?, addr(peer, device)?);
         let st = &mut self.st;
         let msg = sync(message_encrypt(plaintext, &them, &me, &mut st.sessions, &mut st.ids, time(now_ms), &mut rand::rng()))
             .map_err(err)?;
@@ -398,14 +532,14 @@ impl Account {
     }
 
     /// Decrypt an envelope from `peer` (the sender as claimed by the server; a false claim fails).
-    pub fn decrypt(&mut self, peer: &str, envelope: &[u8]) -> R<Vec<u8>> {
+    pub fn decrypt(&mut self, peer: &str, device: u32, envelope: &[u8]) -> R<Vec<u8>> {
         let (&ty, body) = envelope.split_first().ok_or_else(|| err("empty envelope"))?;
         let msg = match CiphertextMessageType::try_from(ty).map_err(|_| err("bad message type"))? {
             CiphertextMessageType::Whisper => CiphertextMessage::SignalMessage(body.try_into().map_err(err)?),
             CiphertextMessageType::PreKey => CiphertextMessage::PreKeySignalMessage(body.try_into().map_err(err)?),
             _ => return Err(err("unsupported message type")),
         };
-        let (me, them) = (addr(&self.id), addr(peer));
+        let (me, them) = (addr(&self.id, self.device)?, addr(peer, device)?);
         let st = &mut self.st;
         sync(message_decrypt(
             &msg,
@@ -466,7 +600,7 @@ pub mod sealed {
     }
 
     /// A sender certificate binding an account id (= its identity key) until `expires_ms`.
-    pub fn sender_certificate(server_cert: &[u8], server_private: &[u8], sender_id: &str, expires_ms: u64) -> Result<Vec<u8>, String> {
+    pub fn sender_certificate(server_cert: &[u8], server_private: &[u8], sender_id: &str, device: u32, expires_ms: u64) -> Result<Vec<u8>, String> {
         let signer = ServerCertificate::deserialize(server_cert).map_err(|e| e.to_string())?;
         let key = PrivateKey::deserialize(server_private).map_err(|e| e.to_string())?;
         let identity = id_key(sender_id).map_err(|e| e.to_string())?;
@@ -474,7 +608,7 @@ pub mod sealed {
             sender_id.to_owned(),
             None,
             *identity.public_key(),
-            DeviceId::new(DEVICE).expect("valid device id"),
+            DeviceId::try_from(device).map_err(|_| "bad device id".to_string())?,
             Timestamp::from_epoch_millis(expires_ms),
             signer,
             &key,
@@ -488,15 +622,15 @@ pub mod sealed {
 #[wasm_bindgen]
 impl Account {
     /// Sealed sender: encrypt so the server can't see who sent it. Needs an existing session.
-    pub fn seal(&mut self, peer: &str, plaintext: &[u8], sender_cert: &[u8], now_ms: f64) -> R<Vec<u8>> {
+    pub fn seal(&mut self, peer: &str, device: u32, plaintext: &[u8], sender_cert: &[u8], now_ms: f64) -> R<Vec<u8>> {
         let cert = SenderCertificate::deserialize(sender_cert).map_err(err)?;
-        let them = addr(peer);
+        let them = addr(peer, device)?;
         let st = &mut self.st;
         sync(sealed_sender_encrypt(&them, &cert, plaintext, &mut st.sessions, &mut st.ids, time(now_ms), &mut rand::rng())).map_err(err)
     }
 
     /// Open a sealed message: verifies the sender certificate against the pinned trust root,
-    /// decrypts, and returns [43-byte sender id] ++ plaintext. Our identity store still checks that
+    /// decrypts, and returns [43-byte sender id] ++ [sender device] ++ plaintext. Our identity store still checks that
     /// the sender's identity key equals their account id, so a forged certificate can't impersonate.
     pub fn unseal(&mut self, data: &[u8], trust_root: &[u8], now_ms: f64) -> R<Vec<u8>> {
         let trust = PublicKey::deserialize(trust_root).map_err(err)?;
@@ -508,7 +642,7 @@ impl Account {
             Timestamp::from_epoch_millis(now_ms as u64),
             None,
             me,
-            DeviceId::new(DEVICE).map_err(err)?,
+            device_id(self.device)?,
             &mut st.ids,
             &mut st.sessions,
             &mut st.prekeys,
@@ -520,6 +654,7 @@ impl Account {
             return Err(err("bad sender"));
         }
         let mut v = out.sender_uuid.into_bytes();
+        v.push(u8::from(out.device_id));
         v.extend_from_slice(&out.message);
         Ok(v)
     }
@@ -605,10 +740,10 @@ impl KyberPreKeyStore for Kyber {
 #[async_trait::async_trait(?Send)]
 impl SessionStore for Sessions {
     async fn load_session(&self, address: &ProtocolAddress) -> LResult<Option<SessionRecord>> {
-        self.0.get(address.name()).map(|r| SessionRecord::deserialize(r)).transpose()
+        self.0.get(&session_key(address.name(), address.device_id().into())).map(|r| SessionRecord::deserialize(r)).transpose()
     }
     async fn store_session(&mut self, address: &ProtocolAddress, record: &SessionRecord) -> LResult<()> {
-        self.0.insert(address.name().to_owned(), record.serialize()?);
+        self.0.insert(session_key(address.name(), address.device_id().into()), record.serialize()?);
         Ok(())
     }
 }
@@ -634,25 +769,25 @@ mod tests {
         let b = bundle(&mut bob);
 
         // Bob's bundle presented as someone else's: signature check fails.
-        assert!(alice.start_session(&mallory.id(), &b, T).is_err());
+        assert!(alice.start_session(&mallory.id(), 1, &b, T).is_err());
 
-        alice.start_session(&bob.id(), &b, T).unwrap();
-        let m1 = alice.encrypt(&bob.id(), b"hi bob", T).unwrap();
+        alice.start_session(&bob.id(), 1, &b, T).unwrap();
+        let m1 = alice.encrypt(&bob.id(), 1, b"hi bob", T).unwrap();
         assert_eq!(m1[0], CiphertextMessageType::PreKey as u8);
 
         // Server lying about the sender: rejected.
-        assert!(bob.decrypt(&mallory.id(), &m1).is_err());
+        assert!(bob.decrypt(&mallory.id(), 1, &m1).is_err());
 
         // State survives save/load, then decrypts; replay is rejected.
         let mut bob = Account::load(&bob.save()).unwrap();
-        assert_eq!(bob.decrypt(&alice.id(), &m1).unwrap(), b"hi bob");
-        assert!(bob.decrypt(&alice.id(), &m1).is_err());
+        assert_eq!(bob.decrypt(&alice.id(), 1, &m1).unwrap(), b"hi bob");
+        assert!(bob.decrypt(&alice.id(), 1, &m1).is_err());
 
-        let m2 = bob.encrypt(&alice.id(), b"hi alice", T).unwrap();
-        assert_eq!(alice.decrypt(&bob.id(), &m2).unwrap(), b"hi alice");
+        let m2 = bob.encrypt(&alice.id(), 1, b"hi alice", T).unwrap();
+        assert_eq!(alice.decrypt(&bob.id(), 1, &m2).unwrap(), b"hi alice");
         for i in 0..5 {
-            let m = alice.encrypt(&bob.id(), format!("msg {i}").as_bytes(), T).unwrap();
-            assert_eq!(bob.decrypt(&alice.id(), &m).unwrap(), format!("msg {i}").as_bytes());
+            let m = alice.encrypt(&bob.id(), 1, format!("msg {i}").as_bytes(), T).unwrap();
+            assert_eq!(bob.decrypt(&alice.id(), 1, &m).unwrap(), format!("msg {i}").as_bytes());
         }
         assert_eq!(alice.safety_number(&bob.id()).unwrap(), bob.safety_number(&alice.id()).unwrap());
 
@@ -670,11 +805,11 @@ mod tests {
         // Alice fetched Bob's bundle (last-resort Kyber only), then Bob rotated before her message arrived.
         let mut k: serde_json::Value = serde_json::from_str(&bob.keys(1, 0).unwrap()).unwrap();
         k["pk"] = k["pks"][0].clone();
-        alice.start_session(&bob.id(), &k.to_string(), T).unwrap();
-        let m = alice.encrypt(&bob.id(), b"late", T).unwrap();
+        alice.start_session(&bob.id(), 1, &k.to_string(), T).unwrap();
+        let m = alice.encrypt(&bob.id(), 1, b"late", T).unwrap();
         assert!(!bob.rotate(T + 1000.0).unwrap(), "fresh keys don't rotate");
         assert!(bob.rotate(T + 8.0 * DAY_MS as f64).unwrap());
-        assert_eq!(bob.decrypt(&alice.id(), &m).unwrap(), b"late");
+        assert_eq!(bob.decrypt(&alice.id(), 1, &m).unwrap(), b"late");
         // New bundles advertise the new keys.
         let k2: serde_json::Value = serde_json::from_str(&bob.keys(0, 0).unwrap()).unwrap();
         assert_ne!(k2["spk"]["id"], k["spk"]["id"]);
@@ -688,28 +823,29 @@ mod tests {
         let (trust_priv, trust_pub) = sealed::new_trust_root();
         let (server_cert, server_priv) = sealed::server_certificate(&trust_priv, 1).unwrap();
         let exp = T as u64 + DAY_MS;
-        let cert = sealed::sender_certificate(&server_cert, &server_priv, &alice.id(), exp).unwrap();
+        let cert = sealed::sender_certificate(&server_cert, &server_priv, &alice.id(), 1, exp).unwrap();
 
-        alice.start_session(&bob.id(), &bundle(&mut bob), T).unwrap();
-        let sealed_msg = alice.seal(&bob.id(), b"no metadata", &cert, T).unwrap();
+        alice.start_session(&bob.id(), 1, &bundle(&mut bob), T).unwrap();
+        let sealed_msg = alice.seal(&bob.id(), 1, b"no metadata", &cert, T).unwrap();
         let out = bob.unseal(&sealed_msg, &trust_pub, T).unwrap();
         assert_eq!(&out[..43], alice.id().as_bytes());
-        assert_eq!(&out[43..], b"no metadata");
+        assert_eq!(out[43], 1, "sender device");
+        assert_eq!(&out[44..], b"no metadata");
 
         // Replies seal the other way too.
-        let bob_cert = sealed::sender_certificate(&server_cert, &server_priv, &bob.id(), exp).unwrap();
-        let back = bob.seal(&alice.id(), b"hi", &bob_cert, T).unwrap();
-        assert_eq!(&alice.unseal(&back, &trust_pub, T).unwrap()[43..], b"hi");
+        let bob_cert = sealed::sender_certificate(&server_cert, &server_priv, &bob.id(), 1, exp).unwrap();
+        let back = bob.seal(&alice.id(), 1, b"hi", &bob_cert, T).unwrap();
+        assert_eq!(&alice.unseal(&back, &trust_pub, T).unwrap()[44..], b"hi");
 
         // A certificate claiming to be Mallory over Alice's session doesn't decrypt as Mallory.
-        let forged = sealed::sender_certificate(&server_cert, &server_priv, &mallory.id(), exp).unwrap();
-        let fake = alice.seal(&bob.id(), b"spoof", &forged, T).unwrap();
+        let forged = sealed::sender_certificate(&server_cert, &server_priv, &mallory.id(), 1, exp).unwrap();
+        let fake = alice.seal(&bob.id(), 1, b"spoof", &forged, T).unwrap();
         assert!(bob.unseal(&fake, &trust_pub, T).is_err());
         // Expired certificates and wrong trust roots are rejected.
-        let m2 = alice.seal(&bob.id(), b"late", &cert, T).unwrap();
+        let m2 = alice.seal(&bob.id(), 1, b"late", &cert, T).unwrap();
         assert!(bob.unseal(&m2, &trust_pub, T + 2.0 * DAY_MS as f64).is_err());
         let (_, other_root) = sealed::new_trust_root();
-        let m3 = alice.seal(&bob.id(), b"x", &cert, T).unwrap();
+        let m3 = alice.seal(&bob.id(), 1, b"x", &cert, T).unwrap();
         assert!(bob.unseal(&m3, &other_root, T).is_err());
     }
 
@@ -735,6 +871,82 @@ mod tests {
         assert!(bob.safety_compare(&alice.id(), &alice.safety_qr(&bob.id()).unwrap()).unwrap());
         // A code for a different pair doesn't verify.
         assert!(!bob.safety_compare(&alice.id(), &carol.safety_qr(&bob.id()).unwrap()).unwrap_or(false));
+    }
+
+    #[test]
+    fn linked_device_shares_identity_with_its_own_sessions() {
+        let mut alice = Account::create(&new_mnemonic(), T).unwrap();
+        let mut bob = Account::create(&new_mnemonic(), T).unwrap();
+        // Linking: the new device's throwaway key and the main device agree on a transfer key.
+        let lk = link_keypair();
+        let main_side = link_agree(&link_keypair()[..32], &lk[32..]).unwrap();
+        assert_eq!(main_side.len(), 32);
+        let other = link_keypair();
+        assert_eq!(link_agree(&other[..32], &lk[32..]).unwrap(), link_agree(&lk[..32], &other[32..]).unwrap());
+
+        let mut laptop = Account::create_linked(&alice.link_identity().unwrap(), 2, T).unwrap();
+        assert_eq!(laptop.id(), alice.id());
+        assert_eq!((laptop.device(), laptop.is_main(), laptop.phrase().as_str()), (2, false, ""));
+        assert!(laptop.main_sign(b"x").is_err() && laptop.link_identity().is_err(), "only the main device holds the main key");
+        assert!(Account::create_linked(&alice.link_identity().unwrap(), 1, T).is_err());
+        // Each linked device has its own login key; the main device doesn't.
+        let tablet = Account::create_linked(&alice.link_identity().unwrap(), 3, T).unwrap();
+        assert_ne!(laptop.device_public().unwrap(), tablet.device_public().unwrap());
+        assert!(verify(&laptop.device_public().unwrap(), b"c", &laptop.device_sign(b"c").unwrap()));
+        assert!(!verify(&tablet.device_public().unwrap(), b"c", &laptop.device_sign(b"c").unwrap()));
+        assert!(alice.device_public().is_err());
+        // The main-device key comes from the phrase: a restore gets the same one.
+        let sig = alice.main_sign(b"login").unwrap();
+        assert!(verify(&alice.main_public().unwrap(), b"login", &sig));
+        assert!(!verify(&alice.id(), b"login", &sig), "main key differs from the identity key");
+        assert_eq!(Account::create(&alice.phrase(), T).unwrap().main_public().unwrap(), alice.main_public().unwrap());
+
+        // Bob talks to both of Alice's devices; each has its own session.
+        bob.start_session(&alice.id(), 1, &bundle(&mut alice), T).unwrap();
+        bob.start_session(&alice.id(), 2, &bundle(&mut laptop), T).unwrap();
+        let mut devs = bob.session_devices(&alice.id());
+        devs.sort();
+        assert_eq!(devs, vec![1, 2]);
+        let to_phone = bob.encrypt(&alice.id(), 1, b"hi phone", T).unwrap();
+        let to_laptop = bob.encrypt(&alice.id(), 2, b"hi laptop", T).unwrap();
+        assert!(laptop.decrypt(&bob.id(), 1, &to_phone).is_err(), "a device can't read another device's copy");
+        assert_eq!(alice.decrypt(&bob.id(), 1, &to_phone).unwrap(), b"hi phone");
+        assert_eq!(laptop.decrypt(&bob.id(), 1, &to_laptop).unwrap(), b"hi laptop");
+        // Replies come from a specific device; the laptop's state survives save/load.
+        let key = laptop.device_public().unwrap();
+        let mut laptop = Account::load(&laptop.save()).unwrap();
+        assert_eq!((laptop.device(), laptop.device_public().unwrap()), (2, key), "device key survives save/load");
+        let reply = laptop.encrypt(&bob.id(), 1, b"from laptop", T).unwrap();
+        assert!(bob.decrypt(&alice.id(), 1, &reply).is_err(), "wrong device claimed");
+        assert_eq!(bob.decrypt(&alice.id(), 2, &reply).unwrap(), b"from laptop");
+
+        // Sealed sender reports the sending device.
+        let (trust_priv, trust_pub) = sealed::new_trust_root();
+        let (sc, sk) = sealed::server_certificate(&trust_priv, 1).unwrap();
+        let cert = sealed::sender_certificate(&sc, &sk, &laptop.id(), 2, T as u64 + DAY_MS).unwrap();
+        let m = laptop.seal(&bob.id(), 1, b"sealed from laptop", &cert, T).unwrap();
+        let out = bob.unseal(&m, &trust_pub, T).unwrap();
+        assert_eq!((&out[..43], out[43], &out[44..]), (alice.id().as_bytes(), 2, &b"sealed from laptop"[..]));
+
+        // Alice unlinks the laptop: Bob forgets that session.
+        bob.drop_session(&alice.id(), 2);
+        assert_eq!(bob.session_devices(&alice.id()), vec![1]);
+    }
+
+    #[test]
+    fn state_saved_before_multi_device_still_loads() {
+        let mut alice = Account::create(&new_mnemonic(), T).unwrap();
+        let mut bob = Account::create(&new_mnemonic(), T).unwrap();
+        alice.start_session(&bob.id(), 1, &bundle(&mut bob), T).unwrap();
+        // Old format: bare postcard of State, sessions keyed by account id alone.
+        alice.st.sessions.0 = std::mem::take(&mut alice.st.sessions.0).into_iter().map(|(k, v)| (k.split('.').next().unwrap().to_owned(), v)).collect();
+        let legacy = postcard::to_allocvec(&alice.st).unwrap();
+        let mut back = Account::load(&legacy).unwrap();
+        assert_eq!((back.device(), back.id()), (1, alice.id()));
+        assert!(back.has_session(&bob.id(), 1));
+        let m = back.encrypt(&bob.id(), 1, b"still works", T).unwrap();
+        assert_eq!(bob.decrypt(&alice.id(), 1, &m).unwrap(), b"still works");
+        assert!(back.save().starts_with(STATE_V2));
     }
 
     #[test]

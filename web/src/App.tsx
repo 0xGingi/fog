@@ -263,15 +263,25 @@ function AppLockDialog({ onClose }: { onClose: () => void }) {
 }
 
 function Onboarding() {
-  const [step, setStep] = useState<'welcome' | 'create' | 'restore'>('welcome')
+  const [step, setStep] = useState<'welcome' | 'create' | 'restore' | 'link'>('welcome')
+  const [unlinked] = useState(() => fog.wasUnlinked())
   if (step === 'create') return <CreateStep onBack={() => setStep('welcome')} />
   if (step === 'restore') return <RestoreStep onBack={() => setStep('welcome')} />
+  if (step === 'link') return <LinkStep onBack={() => setStep('welcome')} />
   return (
     <div className="fogbank flex min-h-full flex-col items-center justify-center px-6 text-center">
       <h1 className="wordmark text-[clamp(96px,22vw,180px)] leading-none font-[850] tracking-[-0.06em]">fog</h1>
       <p className="mt-8 max-w-sm text-lg text-muted">Private messaging with no phone number, email or password. Your account is a key that only you hold.</p>
+      {unlinked && (
+        <p role="status" className="mt-6 max-w-sm rounded-2xl bg-raised px-4 py-3 text-sm">
+          This device was unlinked from your account, and everything Fog stored on it was erased.
+        </p>
+      )}
       <div className="mt-10 flex w-full max-w-xs flex-col gap-2">
         <Button onClick={() => setStep('create')}>Create account</Button>
+        <Button kind="ghost" onClick={() => setStep('link')}>
+          Link to an existing account
+        </Button>
         <Button kind="ghost" onClick={() => setStep('restore')}>
           I have a recovery phrase
         </Button>
@@ -361,7 +371,10 @@ function RestoreStep({ onBack }: { onBack: () => void }) {
     <Centered>
       <Back onClick={onBack} />
       <h1 className="text-2xl font-bold">Restore your account</h1>
-      <p className="mt-2 text-muted">Enter your 24-word recovery phrase. Messages from your old device stay there; new ones arrive here.</p>
+      <p className="mt-2 text-muted">
+        Enter your 24-word recovery phrase. This becomes your main device: messages on your old one stay there, and any linked devices are signed out. To add a device instead, use{' '}
+        <span className="font-medium text-ink">Link to an existing account</span>.
+      </p>
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -394,6 +407,74 @@ function RestoreStep({ onBack }: { onBack: () => void }) {
           'Restore account'
         )}
       </Button>
+    </Centered>
+  )
+}
+
+/** New device: show a code for the main device to scan, then receive the account and chat history. */
+function LinkStep({ onBack }: { onBack: () => void }) {
+  const [code, setCode] = useState<string | null>(null)
+  const [step, setStep] = useState<'waiting' | 'confirm' | 'linking' | 'history'>('waiting')
+  const [check, setCheck] = useState<{ code: string; answer: (ok: boolean) => void } | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    const ctl = new AbortController()
+    setErr(null)
+    setCode(null)
+    setStep('waiting')
+    const confirm = (c: string) => new Promise<boolean>((answer) => (setCheck({ code: c, answer }), setStep('confirm')))
+    fog
+      .linkThisDevice(setCode, setStep, ctl.signal, confirm)
+      .catch((e) => !ctl.signal.aborted && setErr(e.message === 'expired' ? 'This code expired.' : e.message === 'cancelled' ? 'Linking cancelled. Nothing was copied to this device.' : e.message))
+    return () => ctl.abort()
+  }, [attempt])
+  const qr = useMemo(() => code && `data:image/svg+xml;utf8,${encodeURIComponent(renderSVG(code, { border: 2, blackColor: '#15202b', whiteColor: '#ffffff' }))}`, [code])
+  if (step === 'confirm' && check && !err)
+    return (
+      <Centered>
+        <h1 className="text-2xl font-bold">Check the code</h1>
+        <p className="mt-2 text-muted">Your main device is showing a code. Make sure it's the same as this one before you continue.</p>
+        <p className="mt-6 text-center font-mono text-4xl font-semibold tracking-wider tabular-nums">{check.code}</p>
+        <Button className="mt-8 w-full" onClick={() => check.answer(true)}>
+          It matches
+        </Button>
+        <Button kind="ghost" className="mt-2 w-full" onClick={() => check.answer(false)}>
+          It doesn't match
+        </Button>
+      </Centered>
+    )
+  return (
+    <Centered>
+      <Back onClick={onBack} />
+      <h1 className="text-2xl font-bold">Link to your account</h1>
+      <p className="mt-2 text-muted">
+        On your main device (the one with your recovery phrase), open <span className="font-medium text-ink">Settings → Devices → Link a device</span> and scan this code.
+      </p>
+      <div className="mx-auto mt-6 grid aspect-square w-full max-w-72 place-items-center rounded-3xl bg-white p-4 shadow-sm">
+        {step === 'waiting' && qr && !err ? <img src={qr} alt="Link code" className="size-full" /> : err ? <Icon name="qr" className="size-16 text-[#9aa5b1]" /> : <Spinner />}
+      </div>
+      {step !== 'waiting' && !err && (
+        <p role="status" className="mt-4 text-center font-medium">
+          {step === 'linking' ? 'Setting up this device…' : 'Copying your chats…'}
+        </p>
+      )}
+      {step === 'waiting' && code && !err && (
+        <button onClick={() => copy(code, 'Code copied. Paste it on your main device.')} className="mt-4 flex items-center justify-center gap-1.5 text-sm text-muted hover:text-ink">
+          <Icon name="copy" className="size-4" /> Can't scan? Copy the code instead
+        </button>
+      )}
+      {err && (
+        <>
+          <p role="alert" className="mt-4 text-center text-sm text-danger">
+            {err}
+          </p>
+          <Button className="mt-4 w-full" onClick={() => setAttempt((n) => n + 1)}>
+            Show a new code
+          </Button>
+        </>
+      )}
+      <p className="mt-6 text-center text-sm text-muted">Your chats are copied to this device end-to-end encrypted. The server can't read them.</p>
     </Centered>
   )
 }
@@ -482,6 +563,12 @@ function Main() {
     if (!lockPrompted) db.lockEnabled().then((on) => (on ? fog.updateSettings({ lockPrompted: true }) : setProtect('ask')))
   }, [])
   const [panel, setPanel] = useState<'none' | 'settings' | 'new' | 'group' | 'archived' | 'requests'>('none')
+  const aside = useRef<HTMLElement>(null)
+  const width = useFog((s) => s.settings.sidebar ?? 360)
+  const collapsed = useFog((s) => !!s.settings.sidebarCollapsed)
+  const [dragW, setDragW] = useState<number | null>(null)
+  // Folded to a rail, except while a panel (settings, new chat...) needs the room.
+  const rail = collapsed && panel === 'none' && dragW === null
   const [info, setInfo] = useState(false)
   const search = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -507,8 +594,21 @@ function Main() {
   useEffect(() => setInfo(false), [active])
   return (
     <div className="flex h-full overflow-hidden bg-panel">
-      <aside className={`relative flex w-full flex-col overflow-hidden border-line md:w-[340px] md:border-r lg:w-[380px] ${active ? 'max-md:hidden' : ''}`}>
-        <Sidebar searchRef={search} onMenu={() => setPanel('settings')} onNew={() => setPanel('new')} onArchived={() => setPanel('archived')} onRequests={() => setPanel('requests')} />
+      <aside
+        ref={aside}
+        style={{ '--sb': `${rail ? RAIL : (dragW ?? width)}px` } as React.CSSProperties}
+        className={`relative flex w-full shrink-0 flex-col overflow-hidden border-line md:w-[var(--sb)] md:border-r ${dragW === null ? 'md:transition-[width] md:duration-200' : ''} ${active ? 'max-md:hidden' : ''}`}
+      >
+        <Sidebar
+          compact={rail}
+          searchRef={search}
+          onMenu={() => setPanel('settings')}
+          onNew={() => setPanel('new')}
+          onArchived={() => setPanel('archived')}
+          onRequests={() => setPanel('requests')}
+          onSearch={() => (fog.updateSettings({ sidebarCollapsed: false }), setTimeout(() => search.current?.focus(), 220))}
+        />
+        <SidebarHandle aside={aside} width={width} collapsed={collapsed} onDrag={setDragW} />
         {panel === 'settings' && <Settings onClose={() => setPanel('none')} />}
         {panel === 'new' && <NewChat onClose={() => setPanel('none')} onGroup={() => setPanel('group')} />}
         {panel === 'group' && <NewGroup onClose={() => setPanel('none')} />}
@@ -548,7 +648,23 @@ function EmptyPane() {
   )
 }
 
-function Sidebar({ onMenu, onNew, onArchived, onRequests, searchRef }: { onMenu: () => void; onNew: () => void; onArchived: () => void; onRequests: () => void; searchRef: React.RefObject<HTMLInputElement | null> }) {
+function Sidebar({
+  onMenu,
+  onNew,
+  onArchived,
+  onRequests,
+  onSearch,
+  searchRef,
+  compact,
+}: {
+  onMenu: () => void
+  onNew: () => void
+  onArchived: () => void
+  onRequests: () => void
+  onSearch: () => void
+  searchRef: React.RefObject<HTMLInputElement | null>
+  compact?: boolean
+}) {
   const chats = useFog((s) => s.chats)
   const people = useFog((s) => s.people)
   const active = useFog((s) => s.active)
@@ -565,6 +681,49 @@ function Sidebar({ onMenu, onNew, onArchived, onRequests, searchRef }: { onMenu:
       for (const m of c.messages) if (!m.sys && (m.text.toLowerCase().includes(q) || m.att?.name.toLowerCase().includes(q))) out.push({ chat: c, m })
     return out.sort((a, b) => b.m.ts - a.m.ts).slice(0, 50)
   }, [chats, q])
+
+  // Folded: an avatar rail (unread badges stay visible), like Telegram's narrow sidebar.
+  if (compact) {
+    const all = sortedChats(chats).filter((c) => !c.request && !c.archived)
+    return (
+      <>
+        <header className="flex h-16 shrink-0 items-center justify-center">
+          <IconButton icon="menu" label="Settings" onClick={onMenu} />
+        </header>
+        <nav className="scroll-thin flex flex-1 flex-col gap-1 overflow-y-auto pb-24" aria-label="Chats">
+          <button onClick={onSearch} title="Search" aria-label="Search chats and messages" className="mx-auto grid size-12 shrink-0 place-items-center rounded-full bg-raised text-muted transition hover:text-ink">
+            {conn === 'online' ? <Icon name="search" className="size-5" /> : <Spinner className="size-4" />}
+          </button>
+          {requests.length > 0 && (
+            <button onClick={onRequests} title="Message requests" aria-label={`Message requests, ${requests.length}`} className="relative mx-auto grid size-[64px] place-items-center rounded-2xl hover:bg-hover">
+              <span className="grid size-[50px] place-items-center rounded-full bg-lamp/20 text-lamp">
+                <Icon name="inbox" />
+              </span>
+              <span className="absolute top-1 right-1 grid h-5 min-w-5 place-items-center rounded-full bg-lamp px-1.5 text-xs font-bold text-lamp-ink ring-2 ring-panel">{requests.length}</span>
+            </button>
+          )}
+          {archived.length > 0 && (
+            <button onClick={onArchived} title="Archived chats" aria-label="Archived chats" className="relative mx-auto grid size-[64px] place-items-center rounded-2xl hover:bg-hover">
+              <span className="grid size-[50px] place-items-center rounded-full bg-raised text-muted">
+                <Icon name="archive" />
+              </span>
+            </button>
+          )}
+          {all.map((c) => (
+            <ChatRow key={c.id} chat={c} active={c.id === active} compact />
+          ))}
+        </nav>
+        <button
+          onClick={onNew}
+          aria-label="New chat"
+          title="New chat"
+          className="absolute bottom-[max(1.25rem,env(safe-area-inset-bottom))] left-1/2 grid size-12 -translate-x-1/2 place-items-center rounded-full bg-lamp text-lamp-ink shadow-lg shadow-black/25 transition hover:scale-105 active:scale-95"
+        >
+          <Icon name="pencil" className="size-5" />
+        </button>
+      </>
+    )
+  }
 
   return (
     <>
@@ -692,7 +851,74 @@ function Highlight({ text, q }: { text: string; q: string }) {
   )
 }
 
-function ChatRow({ chat, active }: { chat: Chat; active: boolean }) {
+const RAIL = 84
+const SB_MIN = 280
+const SB_MAX = 520
+/** Narrower than this while dragging folds the list into the avatar rail. */
+const SB_FOLD = 200
+
+/**
+ * The chat list's right edge: drag to resize, drag far left (or double-click) to fold it into an
+ * avatar rail. Keyboard: arrows resize, Enter folds and unfolds.
+ */
+function SidebarHandle({ aside, width, collapsed, onDrag }: { aside: React.RefObject<HTMLElement | null>; width: number; collapsed: boolean; onDrag: (w: number | null) => void }) {
+  const commit = (w: number) => (w < SB_FOLD ? fog.updateSettings({ sidebarCollapsed: true }) : fog.updateSettings({ sidebarCollapsed: false, sidebar: Math.round(Math.min(SB_MAX, Math.max(SB_MIN, w))) }))
+  const toggle = () => fog.updateSettings({ sidebarCollapsed: !collapsed })
+  // Double-click is detected here: preventDefault on pointerdown (no text selection while dragging)
+  // also stops the browser's dblclick.
+  const lastTap = useRef(0)
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Chat list width. Drag or use arrow keys to resize; Enter to collapse or expand."
+      aria-valuenow={collapsed ? RAIL : width}
+      aria-valuemin={RAIL}
+      aria-valuemax={SB_MAX}
+      tabIndex={0}
+      title="Drag to resize. Double-click to collapse."
+      onPointerDown={(e) => {
+        if (e.button !== 0) return
+        e.preventDefault()
+        if (e.timeStamp - lastTap.current < 350) return (lastTap.current = 0), toggle()
+        lastTap.current = e.timeStamp
+        const el = e.currentTarget
+        el.setPointerCapture(e.pointerId)
+        const left = aside.current!.getBoundingClientRect().left
+        let w = collapsed ? RAIL : width
+        const move = (ev: PointerEvent) => {
+          w = ev.clientX - left
+          // Below the fold point, preview the rail; otherwise the clamped width.
+          onDrag(w < SB_FOLD ? RAIL : Math.min(SB_MAX, Math.max(SB_MIN, w)))
+        }
+        const up = () => {
+          el.removeEventListener('pointermove', move)
+          el.removeEventListener('pointerup', up)
+          el.removeEventListener('pointercancel', up)
+          onDrag(null)
+          if (w !== (collapsed ? RAIL : width)) commit(w)
+        }
+        el.addEventListener('pointermove', move)
+        el.addEventListener('pointerup', up)
+        el.addEventListener('pointercancel', up)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') (e.preventDefault(), toggle())
+        else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+          e.preventDefault()
+          const step = e.key === 'ArrowLeft' ? -24 : 24
+          if (collapsed) e.key === 'ArrowRight' && fog.updateSettings({ sidebarCollapsed: false })
+          else commit(width + step < SB_MIN ? SB_FOLD - 1 : width + step)
+        }
+      }}
+      className="group absolute inset-y-0 right-0 z-30 hidden w-1.5 cursor-col-resize outline-none md:block"
+    >
+      <span className="absolute inset-y-0 right-0 w-0.5 bg-lamp opacity-0 transition-opacity group-hover:opacity-60 group-focus-visible:opacity-100 group-active:opacity-100" />
+    </div>
+  )
+}
+
+function ChatRow({ chat, active, compact }: { chat: Chat; active: boolean; compact?: boolean }) {
   const person = useFog((s) => s.people[chat.id])
   const people = useFog((s) => s.people)
   const [menu, setMenu] = useState<MenuAt | null>(null)
@@ -705,6 +931,22 @@ function ChatRow({ chat, active }: { chat: Chat; active: boolean }) {
   const muted = isMuted(chat)
   const [muteDialog, setMuteDialog] = useState(false)
   const who = last && !last.sys && chat.group ? (last.mine ? 'You' : personName(last.from ?? '', people[last.from ?? ''])) : null
+  if (compact)
+    return (
+      <button
+        onClick={() => fog.openChat(chat.id)}
+        title={title}
+        aria-label={`${title}${unread ? `, ${chat.unread || ''} unread` : ''}`}
+        className={`relative mx-auto grid size-[64px] place-items-center rounded-2xl transition ${active ? 'bg-lamp/20 dark:bg-lamp/[0.13]' : 'hover:bg-hover'}`}
+      >
+        <Avatar id={chat.id} name={title} src={chatAvatar(chat, person)} size={50} />
+        {(unread || !!chat.mentions) && (
+          <span className={`pop absolute top-1 right-1 grid h-5 min-w-5 place-items-center rounded-full px-1.5 text-xs font-bold ring-2 ring-panel ${muted ? 'bg-muted/60 text-ink' : 'bg-lamp text-lamp-ink'}`}>
+            {chat.mentions ? '@' : chat.unread || ''}
+          </span>
+        )}
+      </button>
+    )
   return (
     <>
       <button
@@ -871,7 +1113,8 @@ function Settings({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState(profile.name)
   const [showPhrase, setShowPhrase] = useState(false)
   const [notif, setNotif] = useState(typeof Notification === 'undefined' ? 'denied' : Notification.permission)
-  const [dialog, setDialog] = useState<'none' | 'logout' | 'username' | 'share' | 'blocked' | 'lock'>('none')
+  const [dialog, setDialog] = useState<'none' | 'logout' | 'username' | 'share' | 'blocked' | 'lock' | 'devices'>('none')
+  const devices = useFog((s) => s.devices)
   const [lockOn, setLockOn] = useState(false)
   useEffect(() => void db.lockEnabled().then(setLockOn), [dialog])
   const blocked = useFog((s) => s.blocked)
@@ -972,12 +1215,27 @@ function Settings({ onClose }: { onClose: () => void }) {
       </Section>
 
       <Section title="Notifications">
+        {fog.isDesktop ? (
+          <Row
+            icon="bell"
+            title="Notifications"
+            sub="Pop up when a message arrives and Fog isn't in front"
+            right={<Toggle label="Notifications" on={settings.notifications !== false} onChange={(v) => fog.updateSettings({ notifications: v })} />}
+          />
+        ) : (
+          <Row
+            icon="bell"
+            title="Desktop notifications"
+            sub={notif === 'granted' ? 'On while Fog is in the background' : notif === 'denied' ? 'Blocked in your browser settings' : 'Off'}
+            onClick={notif === 'default' ? () => Notification.requestPermission().then(setNotif) : undefined}
+            right={notif === 'default' ? <span className="text-sm font-semibold text-lamp">Turn on</span> : undefined}
+          />
+        )}
         <Row
-          icon="bell"
-          title="Desktop notifications"
-          sub={notif === 'granted' ? 'On while Fog is in the background' : notif === 'denied' ? 'Blocked in your browser settings' : 'Off'}
-          onClick={notif === 'default' ? () => Notification.requestPermission().then(setNotif) : undefined}
-          right={notif === 'default' ? <span className="text-sm font-semibold text-lamp">Turn on</span> : undefined}
+          icon="eye"
+          title="Message previews"
+          sub="Show who it's from and what they said. Off: just “New message”."
+          right={<Toggle label="Message previews" on={settings.previews !== false} onChange={(v) => fog.updateSettings({ previews: v })} />}
         />
         <Row icon="volume" title="Sounds" sub="Play a sound for new messages" right={<Toggle label="Sounds" on={settings.sounds} onChange={(v) => fog.updateSettings({ sounds: v })} />} />
       </Section>
@@ -1001,6 +1259,16 @@ function Settings({ onClose }: { onClose: () => void }) {
         />
       </Section>
 
+      <Section title="Devices">
+        <Row
+          icon="laptop"
+          title="Devices"
+          sub={me.main ? (devices.length > 1 ? `${devices.length} devices` : 'Use Fog on your computer too') : 'This device is linked to your main device'}
+          onClick={() => setDialog('devices')}
+        />
+      </Section>
+
+      {me.main ? (
       <Section title="Recovery phrase">
         <p className="px-3 text-sm text-muted">The only way back into your account on a new device. Never share it.</p>
         <div className="relative mx-3 mt-3">
@@ -1014,6 +1282,11 @@ function Settings({ onClose }: { onClose: () => void }) {
           )}
         </div>
       </Section>
+      ) : (
+        <Section title="Recovery phrase">
+          <p className="px-3 text-sm text-muted">Your recovery phrase is on your main device. Linked devices never receive it.</p>
+        </Section>
+      )}
 
       <div className="mt-6">
         <Row icon="out" title={<span className="text-danger">Log out</span>} onClick={() => setDialog('logout')} />
@@ -1034,9 +1307,12 @@ function Settings({ onClose }: { onClose: () => void }) {
             </>
           }
         >
-          This erases your keys and messages from this device. You need your recovery phrase to log back in.
+          {me.main
+            ? 'This erases your keys and messages from this device. You need your recovery phrase to log back in.'
+            : 'This unlinks this device from your account and erases its keys and messages. Your other devices keep working.'}
         </Dialog>
       )}
+      {dialog === 'devices' && <DevicesDialog onClose={() => setDialog('none')} />}
       {dialog === 'username' && <UsernameDialog current={me.username ?? ''} onClose={() => setDialog('none')} />}
       {dialog === 'share' && <ShareDialog onClose={() => setDialog('none')} />}
       {dialog === 'lock' && <AppLockDialog onClose={() => setDialog('none')} />}
@@ -1054,6 +1330,193 @@ function Settings({ onClose }: { onClose: () => void }) {
         </Dialog>
       )}
     </Drawer>
+  )
+}
+
+const ago = (t: number) => {
+  const m = Math.round((Date.now() - t) / 60_000)
+  return m < 2 ? 'Active now' : m < 60 ? `Active ${m} minutes ago` : m < 1440 ? `Active ${Math.round(m / 60)} hours ago` : `Active ${Math.round(m / 1440)} days ago`
+}
+const deviceLabel = (d: fog.DeviceInfo) => d.name || (d.id === 1 ? 'Main device' : `Device ${d.id}`)
+
+function DevicesDialog({ onClose }: { onClose: () => void }) {
+  const me = useFog((s) => s.me)!
+  const devices = useFog((s) => s.devices)
+  const [linking, setLinking] = useState(false)
+  const [unlink, setUnlink] = useState<fog.DeviceInfo | null>(null)
+  useEffect(() => void fog.loadDevices(), [])
+  if (linking) return <LinkDeviceDialog onClose={() => setLinking(false)} />
+  if (unlink)
+    return (
+      <Dialog
+        title={unlink.id === me.device ? 'Unlink this device?' : `Unlink ${deviceLabel(unlink)}?`}
+        onClose={() => setUnlink(null)}
+        actions={
+          <>
+            <Button kind="ghost" onClick={() => setUnlink(null)}>
+              Cancel
+            </Button>
+            <Button kind="danger" onClick={() => fog.unlinkDevice(unlink.id).then(() => setUnlink(null), () => fog.toast("Couldn't unlink. Check your connection."))}>
+              Unlink
+            </Button>
+          </>
+        }
+      >
+        {unlink.id === me.device ? 'This device is signed out and everything Fog stored on it is erased.' : "It's signed out right away and can't get back in without being linked again."}
+      </Dialog>
+    )
+  const canAdd = me.main && devices.length < 5
+  return (
+    <Dialog
+      title="Devices"
+      onClose={onClose}
+      actions={
+        <>
+          <Button kind="ghost" onClick={onClose}>
+            Done
+          </Button>
+          {canAdd && <Button onClick={() => setLinking(true)}>Link a device</Button>}
+        </>
+      }
+    >
+      <div className="-mx-2 mt-2">
+        {devices.map((d) => (
+          <div key={d.id} className="flex items-center gap-3 rounded-xl px-2 py-2.5">
+            <span className="grid size-10 shrink-0 place-items-center rounded-full bg-raised text-ink">
+              <Icon name="laptop" className="size-5" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-medium text-ink">
+                {deviceLabel(d)}
+                {d.id === 1 && <span className="ml-2 rounded-full bg-lamp/20 px-2 py-0.5 text-xs font-semibold text-out-accent">Main</span>}
+              </p>
+              <p className="text-sm">{d.id === me.device ? 'This device' : !d.ready ? 'Setting up…' : ago(d.seen)}</p>
+            </div>
+            {d.id !== 1 && (me.main || d.id === me.device) && (
+              <Button kind="soft" className="h-9 px-3 text-sm" onClick={() => setUnlink(d)}>
+                Unlink
+              </Button>
+            )}
+          </div>
+        ))}
+      </div>
+      <p className="mt-3 text-sm">
+        {me.main
+          ? 'Link a browser or the desktop app. Each device gets your chat history and its own encryption keys, and works even when this one is offline.'
+          : 'Only your main device, the one with your recovery phrase, can link or unlink other devices.'}
+      </p>
+    </Dialog>
+  )
+}
+
+const linkError = (e: string) =>
+  ({
+    too_many_devices: "You've linked as many devices as you can (5). Unlink one first.",
+    gone: 'That code expired. Show a new one on the other device.',
+    timeout: "The other device didn't finish setting up. Check it's online and try again.",
+    main_only: 'Only your main device can link devices.',
+    bad_code: "That isn't a Fog link code.",
+  })[e] ?? "Couldn't link that device. Check your connection and try again."
+
+/** Main device: scan (or paste) the new device's code, send it the account and chat history. */
+function LinkDeviceDialog({ onClose }: { onClose: () => void }) {
+  const [step, setStep] = useState<'scan' | 'confirm' | 'sending' | 'waiting' | 'done'>('scan')
+  const [err, setErr] = useState<string | null>(null)
+  const [paste, setPaste] = useState('')
+  const [pending, setPending] = useState('')
+  const [check, setCheck] = useState('')
+  const scanned = async (code: string): Promise<string | null> => {
+    setErr(null)
+    if (!fog.parseLinkCode(code)) return (setErr(linkError('bad_code')), linkError('bad_code'))
+    setPending(code)
+    setStep('confirm')
+    return null
+  }
+  const run = async (code: string) => {
+    setStep('sending')
+    try {
+      await fog.linkDevice(code, (s, c) => (setStep(s), c && setCheck(c)))
+      setStep('done')
+      return null
+    } catch (e) {
+      const m = linkError((e as Error).message)
+      setStep('scan')
+      setErr(m)
+      return m
+    }
+  }
+  const busy = step === 'sending' || step === 'waiting'
+  if (step === 'confirm')
+    return (
+      <Dialog
+        title="Link this device?"
+        onClose={onClose}
+        actions={
+          <>
+            <Button kind="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button onClick={() => void run(pending)}>Link device</Button>
+          </>
+        }
+      >
+        It will be able to read all your messages, including your chat history, and send messages as you. Only link a device you own and can see right now. If someone sent you this code, don't continue.
+      </Dialog>
+    )
+  return (
+    <Dialog
+      title={step === 'done' ? 'Device linked' : 'Link a device'}
+      onClose={busy ? () => {} : onClose}
+      actions={
+        step === 'done' ? (
+          <Button onClick={onClose}>Done</Button>
+        ) : (
+          <Button kind="ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+        )
+      }
+    >
+      {step === 'scan' && (
+        <>
+          <p>On the new device, choose “Link to an existing account” and scan the code it shows.</p>
+          {canScan && <QrScanner onCode={scanned} />}
+          <form
+            className="mt-4 flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault()
+              void scanned(paste)
+            }}
+          >
+            <input
+              value={paste}
+              onChange={(e) => setPaste(e.target.value)}
+              placeholder={canScan ? 'Or paste the code' : 'Paste the code from the new device'}
+              aria-label="Link code"
+              className="min-w-0 flex-1 rounded-xl border border-line bg-raised px-3 py-2 text-[15px] text-ink outline-none focus:border-lamp"
+            />
+            <Button disabled={!paste.trim()} className="h-10 px-4">
+              Link
+            </Button>
+          </form>
+          {err && (
+            <p role="alert" className="mt-3 text-sm text-danger">
+              {err}
+            </p>
+          )}
+        </>
+      )}
+      {busy && (
+        <div className="flex flex-col items-center py-8 text-center">
+          <Spinner />
+          <p role="status" className="mt-4 font-medium text-ink">
+            {step === 'sending' ? 'Sending your chats, end-to-end encrypted…' : 'On the new device, check this code matches:'}
+          </p>
+          {step === 'waiting' && check && <p className="mt-3 font-mono text-3xl font-semibold tracking-wider text-ink tabular-nums">{check}</p>}
+        </div>
+      )}
+      {step === 'done' && <p>Your new device is ready. Messages now arrive on all your devices.</p>}
+    </Dialog>
   )
 }
 
@@ -1245,6 +1708,15 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
 
 /** Camera QR scanner. `onCode` returns an error to show, or null when the code was handled. */
 function ScanDialog({ onClose, onCode, title = 'Scan a QR code', hint = 'Point your camera at a Fog QR code.' }: { onClose: () => void; onCode: (raw: string) => Promise<string | null>; title?: string; hint?: string }) {
+  return (
+    <Dialog title={title} onClose={onClose} actions={<Button kind="ghost" onClick={onClose}>Cancel</Button>}>
+      <QrScanner onCode={onCode} hint={hint} />
+    </Dialog>
+  )
+}
+
+/** Live camera QR scanner. `onCode` returns an error to show (and keeps scanning), or null when done. */
+function QrScanner({ onCode, hint = 'Point your camera at the code.' }: { onCode: (raw: string) => Promise<string | null>; hint?: string }) {
   const video = useRef<HTMLVideoElement>(null)
   const [err, setErr] = useState<string | null>(null)
   useEffect(() => {
@@ -1257,12 +1729,15 @@ function ScanDialog({ onClose, onCode, title = 'Scan a QR code', hint = 'Point y
         if (stop) return stream.getTracks().forEach((t) => t.stop())
         video.current!.srcObject = stream
         await video.current!.play()
+        let last = ''
         while (!stop) {
           const codes = await detector.detect(video.current).catch(() => [])
-          if (codes[0]?.rawValue) {
-            stop = true
-            setErr(await onCode(codes[0].rawValue))
-            break
+          const raw = codes[0]?.rawValue
+          if (raw && raw !== last) {
+            last = raw
+            const e = await onCode(raw)
+            if (!e) break
+            setErr(e)
           }
           await new Promise((r) => setTimeout(r, 250))
         }
@@ -1276,13 +1751,13 @@ function ScanDialog({ onClose, onCode, title = 'Scan a QR code', hint = 'Point y
     }
   }, [])
   return (
-    <Dialog title={title} onClose={onClose} actions={<Button kind="ghost" onClick={onClose}>Cancel</Button>}>
-      <div className="relative mt-2 aspect-square overflow-hidden rounded-3xl bg-black">
+    <>
+      <div className="relative mt-3 aspect-square overflow-hidden rounded-3xl bg-black">
         <video ref={video} playsInline muted className="size-full object-cover" />
         <div className="pointer-events-none absolute inset-10 rounded-3xl border-4 border-white/80 shadow-[0_0_0_999px_rgba(0,0,0,0.35)]" />
       </div>
       <p className={`mt-3 text-center text-sm ${err ? 'text-danger' : ''}`}>{err ?? hint}</p>
-    </Dialog>
+    </>
   )
 }
 

@@ -46,6 +46,7 @@ Fog is a self-hostable, end-to-end encrypted messenger built on Signal's Rust `l
 | **No Key Swaps (No TOFU)** | Clients trust an identity only if it matches the peer's account ID verbatim — no "safety number changed" warnings to click through. The remaining risk is the server lying about which ID a `@username` belongs to: chat info shows a safety number and a scannable safety code (Signal's fingerprint format); scanning or comparing it marks the contact **Verified**. |
 | **Message Encryption** | Signal Protocol directly from [`signalapp/libsignal`](https://github.com/signalapp/libsignal): **PQXDH** (X25519 + Kyber-1024) and the **Double Ratchet with SPQR**. One-time post-quantum prekeys are preferred before falling back to the last-resort key, and signed prekeys rotate weekly (old keys kept 30 days for in-flight messages). |
 | **Authentication** | Challenge-response login using an XEdDSA signature over a server nonce bound to the connected host, preventing cross-server challenge relay. |
+| **Multiple Devices** | Up to five devices per account: the **main device** (the one with your recovery phrase) plus linked browsers or desktop apps. Each device has its own device ID, prekeys and Signal sessions; senders encrypt a separate copy for every device, and the server rejects a send that doesn't cover exactly the recipient's current devices, so a stale device list gets corrected instead of a device being skipped. Every device's prekeys are signed by the account's identity key, so the server can't slip in a device of its own. Linking is a QR code: the main device sends the identity key and your chat history to the new device, end-to-end encrypted (X25519 + HKDF + AES-256-GCM; history as an encrypted blob). Linked devices never receive the recovery phrase. Device 1 must also sign in with a key derived from the phrase, so only the main device can link or unlink devices, and unlinking takes effect on the server immediately. Restoring the phrase on a new device makes it the main device and signs out every linked one. |
 | **Sealed Sender** | Once two accounts are contacts, messages, receipts, typing indicators, and reactions are sent to a login-free `/sealed` endpoint gated by an E2EE-shared access key, using short-lived sender certificates. The server stores no sender for sealed traffic. First messages to strangers are unsealed (as in Signal). |
 | **Metadata Padding** | Every message is padded to a multiple of 160 bytes before encryption, so the server can't tell a "k" from a sentence, or a receipt from a reaction, by size. |
 | **Attachments** | Any file up to 100 MB, padded to ~5% size buckets (Signal's scheme) and encrypted client-side with a fresh **AES-256-GCM** key per file. Only ciphertext is uploaded; the blob ID and key travel inside the Signal message. Non-inline MIME types are served as `application/octet-stream` so attached `.html` or `.svg` files cannot run script on the app origin. |
@@ -61,10 +62,11 @@ Fog is a self-hostable, end-to-end encrypted messenger built on Signal's Rust `l
 > **Limits we can't fully close:**
 > - *Web delivery.* A web app is only as trustworthy as the server that serves it. A compromised server could ship modified JavaScript. Mitigations: the desktop app, and reproducible builds anyone can compare with the live site.
 > - *Key directory.* There's no key transparency log (a separate, large project). Instead, verify safety numbers with people who matter.
+> - *Linked devices hold the identity key.* As in Signal, so a stolen linked device can read what it already has and, if it also had the server's cooperation, could be re-added. Unlinking stops it receiving anything new; restoring your phrase on a new device signs out everything else.
 
 ## Desktop App
 
-The desktop app ([Tauri](https://tauri.app)) wraps the same client in a native window. It loads only files bundled at build time, grants the page no native commands, and talks to `https://getfog.org`.
+The desktop app ([Tauri](https://tauri.app)) wraps the same client in a native window and talks to `https://getfog.org`. It loads only files bundled at build time, and the page can call exactly two native commands: show a notification, and set the unread count (shown next to the menu bar icon and on the Dock). No other Tauri APIs are granted. Closing the window keeps Fog running in the menu bar (system tray on Windows and Linux) so messages and calls keep arriving; quit from its menu.
 
 **Download:** [latest release](https://github.com/0xGingi/fog/releases/latest) for macOS (Apple silicon), Windows (x64) and Linux (x64, arm64; AppImage, deb, rpm).
 
@@ -99,6 +101,8 @@ The crypto core is compiled to WebAssembly once and shared by every platform bui
 | `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | Apple ID, an app-specific password, and your team ID, for notarization |
 
 Windows builds are unsigned for now, so SmartScreen warns on first run until a code-signing certificate is added.
+
+**Auto-updates.** The desktop app checks for a newer release at launch and every 6 hours, installs it in the background, and offers to restart. Updates are signed: each release publishes `latest.json` (from `uploadUpdaterJson`) and the app only installs files whose signature matches the public key in [`tauri.conf.json`](web/src-tauri/tauri.conf.json). Checking happens in the app's Rust layer, so the web page still has no native access. The private key lives in the `TAURI_SIGNING_PRIVATE_KEY` repository secret. **Keep a backup of it**: without it you can't ship updates to existing installs. Linux updates apply to the AppImage; `.deb`/`.rpm` installs update through a new download.
 
 ## Architecture
 
@@ -243,7 +247,6 @@ Every file must match. `index.html` names each script by its content hash, so a 
 Deliberate architectural shortcuts are marked `ponytail:` in the source code so they are easy to find and revisit.
 
 **Next up**
-- Multi-device support: linked devices sharing the identity key (as in Signal), each with its own device ID and prekeys
 - Signal Sender Keys for larger groups (>50 members) and multi-admin permissions
 - Streaming/chunked encryption and resumable uploads for files over 100 MB
 - Group calls, animated stickers, and privacy-preserving GIF search (via proxy)

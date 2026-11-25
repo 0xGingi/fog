@@ -421,7 +421,7 @@ export function Bubble(props: BubbleProps) {
       )}
       <div
         data-bubble
-        className={`${fresh ? 'msg-in' : ''} ${lifted ? 'lift' : ''} relative max-w-[min(85%,520px)] rounded-[18px] ${color} ${shape} ${mediaOnly ? 'overflow-hidden shadow-sm' : big ? '' : 'shadow-[0_1px_1px_rgba(0,0,0,0.08)]'}`}
+        className={`${fresh ? 'msg-in' : ''} ${lifted ? 'lift' : ''} relative max-w-[min(85%,560px)] rounded-[18px] ${color} ${shape} ${mediaOnly ? 'overflow-hidden shadow-sm' : big ? '' : 'shadow-[0_1px_1px_rgba(0,0,0,0.08)]'}`}
         style={{ transform: dx ? `translateX(${dx}px)` : undefined, transition: dx ? 'none' : 'transform 200ms ease' }}
       >
         {groupIn && !joinPrev && !media && !big && (

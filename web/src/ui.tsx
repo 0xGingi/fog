@@ -34,6 +34,7 @@ const paths: Record<string, string> = {
   image: 'M4 5h16v14H4zM4 16l5-5 4 4 2-2 5 5M15 9.5h.01',
   next: 'M9 5l7 7-7 7',
   up: 'M6 15l6-6 6 6',
+  laptop: 'M5 5h14a1 1 0 011 1v9H4V6a1 1 0 011-1zM2 18h20',
   shield: 'M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zM9 12l2 2 4-4',
   block: 'M12 21a9 9 0 100-18 9 9 0 000 18zM5.6 5.6l12.8 12.8',
   flag: 'M5 21V4h11l-1.5 4L16 12H5',

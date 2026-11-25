@@ -148,6 +148,6 @@
 
 /* The download card for the visitor's own system (set in landing.ts). */
 .os-match {
-  border-color: var(--lamp);
-  box-shadow: 0 0 0 1px var(--lamp);
+  background: color-mix(in oklab, var(--lamp) 9%, var(--panel));
+  box-shadow: inset 3px 0 0 var(--lamp);
 }

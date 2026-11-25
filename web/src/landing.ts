@@ -80,5 +80,5 @@ indexedDB
 // Highlight the download for this computer. Phones and tablets get none (no mobile app yet).
 const ua = navigator.userAgent
 const touchMac = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1 // iPadOS reports itself as a Mac
-const os = /Android|iPhone|iPad/.test(ua) || touchMac ? null : /Mac/.test(ua) ? 'mac' : /Win/.test(ua) ? 'windows' : /Linux|X11/.test(ua) ? 'linux' : null
+const os = /Android|iPhone|iPad/.test(ua) || touchMac ? null : /Mac/.test(ua) ? 'mac' : /Win/.test(ua) ? 'windows' : /Linux|X11/.test(ua) ? (/aarch64|arm64|armv8/i.test(ua) ? 'linux-arm64' : 'linux-x64') : null
 if (os) document.querySelector(`[data-os="${os}"]`)?.classList.add('os-match')

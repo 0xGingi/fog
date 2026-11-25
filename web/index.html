@@ -136,20 +136,20 @@
             <dd class="mt-1.5 leading-relaxed text-muted">Up to 100 MB each, from holiday videos to source code. Encrypted on your device before upload.</dd>
           </div>
           <div class="border-t border-line pt-5">
-            <dt class="font-semibold">Voice and video calls</dt>
-            <dd class="mt-1.5 leading-relaxed text-muted">With screen sharing. Turn on relaying to keep your IP address from the person you're calling.</dd>
+            <dt class="font-semibold">Calls, voice and video messages</dt>
+            <dd class="mt-1.5 leading-relaxed text-muted">Calls with screen sharing, and voice notes or short videos in a tap. Relaying keeps your IP address from the person you're calling.</dd>
           </div>
           <div class="border-t border-line pt-5">
             <dt class="font-semibold">Groups</dt>
             <dd class="mt-1.5 leading-relaxed text-muted">The server can't tell a group from ordinary one-to-one chats. Changes are signed by the group's owner.</dd>
           </div>
           <div class="border-t border-line pt-5">
-            <dt class="font-semibold">Voice and video messages</dt>
-            <dd class="mt-1.5 leading-relaxed text-muted">Record a voice note or a short video in a tap. Stickers and polls too.</dd>
+            <dt class="font-semibold">On all your devices</dt>
+            <dd class="mt-1.5 leading-relaxed text-muted">Link your computer with a QR code: your chats come along, and messages, calls and reads stay in step everywhere.</dd>
           </div>
           <div class="border-t border-line pt-5">
             <dt class="font-semibold">Disappearing messages</dt>
-            <dd class="mt-1.5 leading-relaxed text-muted">From 30 seconds to a week, set per chat. Replies, reactions, edits and pins work as you'd expect.</dd>
+            <dd class="mt-1.5 leading-relaxed text-muted">From 30 seconds to a week, set per chat. Replies, reactions, edits, pins, polls and stickers work as you'd expect.</dd>
           </div>
           <div class="border-t border-line pt-5">
             <dt class="font-semibold">Message requests</dt>
@@ -251,40 +251,60 @@ bun web/verify.ts https://getfog.org ./my-build
         <div class="mx-auto max-w-6xl px-4 py-20 sm:px-6 lg:py-28">
           <h2 class="max-w-[20ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Fog for your computer.</h2>
           <p class="mt-5 max-w-[40rem] text-lg leading-relaxed text-muted">
-            The desktop app ships Fog's code once, at install, instead of loading it on every visit. Use it instead of the browser, not alongside it: an account lives on one device at a time.
+            The desktop app ships Fog's code once, at install, instead of loading it on every visit, and keeps itself up to date. Link it to your account with a QR code and your chats come with it.
           </p>
-          <div class="mt-12 grid gap-6 md:grid-cols-3 [&>*]:min-w-0">
-            <div data-os="mac" class="flex flex-col rounded-3xl border border-line bg-panel p-7">
-              <h3 class="text-xl font-semibold">macOS</h3>
-              <p class="mt-1 text-muted">Apple silicon (M1 and later)</p>
-              <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-macOS-arm64.dmg" class="inline-flex items-center justify-center rounded-full bg-lamp px-5 py-3 font-semibold text-lamp-ink transition hover:brightness-105 mt-6">Download for macOS</a>
-              <p class="mt-auto pt-5 text-sm leading-relaxed text-muted">Signed and notarized by Apple.</p>
-            </div>
-            <div data-os="windows" class="flex flex-col rounded-3xl border border-line bg-panel p-7">
-              <h3 class="text-xl font-semibold">Windows</h3>
-              <p class="mt-1 text-muted">Windows 10 and 11, 64-bit</p>
-              <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Windows-x64-setup.exe" class="inline-flex items-center justify-center rounded-full bg-lamp px-5 py-3 font-semibold text-lamp-ink transition hover:brightness-105 mt-6">Download for Windows</a>
-              <div class="mt-3 flex flex-wrap gap-2"><a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Windows-x64.msi" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">.msi installer</a></div>
-              <p class="mt-auto pt-5 text-sm leading-relaxed text-muted">Not code-signed yet, so Windows may ask you to confirm on first run.</p>
-            </div>
-            <div data-os="linux" class="flex flex-col rounded-3xl border border-line bg-panel p-7">
-              <h3 class="text-xl font-semibold">Linux</h3>
-              <p class="mt-1 text-muted">x64 and arm64</p>
-              <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-x64.AppImage" class="inline-flex items-center justify-center rounded-full bg-lamp px-5 py-3 font-semibold text-lamp-ink transition hover:brightness-105 mt-6">AppImage for x64</a>
-              <div class="mt-3 flex flex-wrap gap-2">
-                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-x64.deb" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">.deb</a>
-                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-x64.rpm" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">.rpm</a>
+          <ul class="mt-12 divide-y divide-line overflow-hidden rounded-3xl border border-line bg-panel">
+            <li data-os="mac" class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:gap-6">
+              <div class="min-w-0 flex-1">
+                <p class="text-lg font-semibold">macOS</p>
+                <p class="mt-0.5 text-[15px] text-muted">Apple silicon (M1 and later), signed and notarized by Apple</p>
               </div>
-              <p class="mt-5 text-sm font-medium">arm64</p>
-              <div class="mt-2 flex flex-wrap gap-2">
-                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-arm64.AppImage" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">AppImage</a>
-                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-arm64.deb" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">.deb</a>
-                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-arm64.rpm" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">.rpm</a>
+              <div class="flex flex-wrap items-center gap-2 sm:flex-row-reverse sm:justify-start">
+                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-macOS-arm64.dmg" class="inline-flex h-11 shrink-0 items-center justify-center rounded-full bg-lamp px-5 font-semibold text-lamp-ink transition hover:brightness-105">Download for macOS</a>
               </div>
-            </div>
-          </div>
-          <p class="mt-8 text-[15px] text-muted">
-            Release notes and every past version are on <a href="https://github.com/0xGingi/fog/releases" rel="noopener" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">GitHub</a>.
+            </li>
+            <li data-os="windows" class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:gap-6">
+              <div class="min-w-0 flex-1">
+                <p class="text-lg font-semibold">Windows</p>
+                <p class="mt-0.5 text-[15px] text-muted">Windows 10 and 11, 64-bit</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-2 sm:flex-row-reverse sm:justify-start">
+                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Windows-x64-setup.exe" class="inline-flex h-11 shrink-0 items-center justify-center rounded-full bg-lamp px-5 font-semibold text-lamp-ink transition hover:brightness-105">Download for Windows</a>
+                <div class="flex gap-2">
+                  <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Windows-x64.msi" class="inline-flex h-11 items-center rounded-full border border-line px-4 text-sm font-medium text-muted transition hover:border-muted hover:text-ink">.msi</a>
+                </div>
+              </div>
+            </li>
+            <li data-os="linux-x64" class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:gap-6">
+              <div class="min-w-0 flex-1">
+                <p class="text-lg font-semibold">Linux</p>
+                <p class="mt-0.5 text-[15px] text-muted">x64, for most Intel and AMD PCs</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-2 sm:flex-row-reverse sm:justify-start">
+                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-x64.AppImage" class="inline-flex h-11 shrink-0 items-center justify-center rounded-full bg-lamp px-5 font-semibold text-lamp-ink transition hover:brightness-105">Download AppImage</a>
+                <div class="flex gap-2">
+                  <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-x64.deb" class="inline-flex h-11 items-center rounded-full border border-line px-4 text-sm font-medium text-muted transition hover:border-muted hover:text-ink">.deb</a>
+                  <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-x64.rpm" class="inline-flex h-11 items-center rounded-full border border-line px-4 text-sm font-medium text-muted transition hover:border-muted hover:text-ink">.rpm</a>
+                </div>
+              </div>
+            </li>
+            <li data-os="linux-arm64" class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:gap-6">
+              <div class="min-w-0 flex-1">
+                <p class="text-lg font-semibold">Linux (arm64)</p>
+                <p class="mt-0.5 text-[15px] text-muted">For ARM laptops and boards like the Raspberry Pi</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-2 sm:flex-row-reverse sm:justify-start">
+                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-arm64.AppImage" class="inline-flex h-11 shrink-0 items-center justify-center rounded-full bg-lamp px-5 font-semibold text-lamp-ink transition hover:brightness-105">Download AppImage</a>
+                <div class="flex gap-2">
+                  <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-arm64.deb" class="inline-flex h-11 items-center rounded-full border border-line px-4 text-sm font-medium text-muted transition hover:border-muted hover:text-ink">.deb</a>
+                  <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-arm64.rpm" class="inline-flex h-11 items-center rounded-full border border-line px-4 text-sm font-medium text-muted transition hover:border-muted hover:text-ink">.rpm</a>
+                </div>
+              </div>
+            </li>
+          </ul>
+          <p class="mt-6 max-w-[48rem] text-[15px] leading-relaxed text-muted">
+            Windows builds aren't code-signed yet, so Windows may ask you to confirm the first time you open Fog. Release notes and every past version are on
+            <a href="https://github.com/0xGingi/fog/releases" rel="noopener" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">GitHub</a>.
           </p>
         </div>
       </section>
@@ -298,7 +318,7 @@ bun web/verify.ts https://getfog.org ./my-build
               Can I use Fog on more than one device?
               <span class="text-2xl leading-none text-muted transition group-open:rotate-45" aria-hidden="true">+</span>
             </summary>
-            <p class="mt-3 leading-relaxed text-muted">Not yet. For now an account lives on one device at a time. Restoring your 24 words on a new device moves the account there. Linked devices are on the roadmap.</p>
+            <p class="mt-3 leading-relaxed text-muted">Yes. Link up to four more devices, in a browser or the desktop app, by scanning a QR code from the device that has your recovery phrase. Each new device gets your chat history and its own encryption keys, and keeps working when the others are offline. You can unlink any of them at any time.</p>
           </details>
           <details class="group py-5">
             <summary class="flex cursor-pointer list-none items-center justify-between gap-4 text-lg font-semibold">

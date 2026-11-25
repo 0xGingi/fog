@@ -38,13 +38,25 @@ const MAX_QUEUED_PER_RECIPIENT: i64 = 10_000;
 /// Bytes of undelivered messages per recipient.
 const MAX_QUEUED_BYTES: i64 = 256 * 1024 * 1024;
 const MESSAGE_TTL_DAYS: i64 = 30;
+/// Devices per account: the main device plus up to four linked ones.
+const MAX_DEVICES: i64 = 5;
+const MAIN_DEVICE: u32 = 1;
+/// A new device's link code is good for this long; the app then shows a fresh one.
+const LINK_CHANNEL_LIFE: Duration = Duration::from_secs(180);
+/// Sender certificates (sealed sender). Short, so a device that's been unlinked can't keep using one.
+const CERT_LIFE_MS: i64 = 6 * 3_600_000;
 const BLOB_TTL_DAYS: u64 = 45;
 
 struct App {
     // ponytail: one global SQLite connection behind a mutex. Fine for thousands of users;
     // move to a pool / Postgres when write contention shows up.
     db: Mutex<Connection>,
-    online: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
+    /// Connected devices, keyed "<account>.<device>".
+    online: Mutex<HashMap<String, Online>>,
+    /// Linking: an approved device slot waiting for the new device's first login (one per account).
+    links: Mutex<HashMap<String, Link>>,
+    /// Linking: the new device's anonymous socket, waiting for the encrypted transfer.
+    channels: Mutex<HashMap<String, (mpsc::UnboundedSender<String>, Instant)>>,
     blobs: PathBuf,
     /// Upload slots handed out over the authenticated socket: id -> (max size, expiry).
     uploads: Mutex<HashMap<String, (u64, Instant)>>,
@@ -115,9 +127,24 @@ fn pow_ok(nonce: &str, counter: u64, bits: u32) -> bool {
     left == 0
 }
 
+/// A connected device: its outbox, and a switch that ends the connection (unlink, or a newer login).
+struct Online {
+    tx: mpsc::UnboundedSender<String>,
+    end: tokio_util::sync::CancellationToken,
+}
+
+struct Link {
+    device: u32,
+    token: String,
+    expires: Instant,
+}
+
 /// Who's asking, for rate limits and signup proof-of-work.
 struct Ctx<'a> {
     me: &'a str,
+    device: u32,
+    /// Device 1's verified main-device key, saved when this login creates the account.
+    main: Option<&'a str>,
     host: &'a str,
     nonce: &'a str,
     ip: IpAddr,
@@ -152,9 +179,13 @@ async fn main() {
            account TEXT NOT NULL, id INTEGER NOT NULL, key TEXT NOT NULL, sig TEXT NOT NULL, PRIMARY KEY(account, id));
          CREATE TABLE IF NOT EXISTS reports(
            reporter TEXT NOT NULL, reported TEXT NOT NULL, ts INTEGER NOT NULL);
-         CREATE TABLE IF NOT EXISTS server_keys(name TEXT PRIMARY KEY, value BLOB NOT NULL);",
+         CREATE TABLE IF NOT EXISTS server_keys(name TEXT PRIMARY KEY, value BLOB NOT NULL);
+         CREATE TABLE IF NOT EXISTS devices(
+           account TEXT NOT NULL, id INTEGER NOT NULL, keys TEXT, name TEXT, created INTEGER NOT NULL,
+           seen INTEGER NOT NULL, PRIMARY KEY(account, id));",
     )
     .expect("migrate");
+    migrate_devices(&db);
     let blobs = PathBuf::from(std::env::var("FOG_BLOBS").unwrap_or("blobs".into()));
     std::fs::create_dir_all(&blobs).expect("blob dir");
     // Accounts may register an access key that gates sealed (sender-less) delivery to them.
@@ -164,6 +195,8 @@ async fn main() {
     let app = Arc::new(App {
         db: Mutex::new(db),
         online: Mutex::default(),
+        links: Mutex::default(),
+        channels: Mutex::default(),
         blobs,
         uploads: Mutex::default(),
         ice_host: env("FOG_ICE_HOST"),
@@ -195,6 +228,7 @@ async fn main() {
     }
     let mut router = Router::new()
         .route("/ws", get(upgrade))
+        .route("/link", get(link_upgrade))
         .route("/blob/{id}", get(get_blob).put(put_blob).layer(DefaultBodyLimit::max(MAX_BLOB as usize)))
         .route("/sealed", post(post_sealed).layer(DefaultBodyLimit::max(MAX_BODY * 2)));
     // Production: serve the built web app: landing page at /, app at /app/, hashed assets cached
@@ -229,6 +263,137 @@ fn cors() -> tower_http::cors::CorsLayer {
         .allow_origin(AllowOrigin::list(origins))
         .allow_methods([axum::http::Method::GET, axum::http::Method::PUT, axum::http::Method::POST])
         .allow_headers([header::CONTENT_TYPE])
+}
+
+/// Multi-device schema: per-device keys, prekeys and queues. Older databases had one device per
+/// account; everything they hold becomes device 1.
+fn migrate_devices(db: &Connection) {
+    let has = |table: &str, col: &str| db.prepare(&format!("SELECT {col} FROM {table} LIMIT 0")).is_ok();
+    let _ = db.execute("ALTER TABLE accounts ADD COLUMN main TEXT", []);
+    let _ = db.execute("ALTER TABLE accounts ADD COLUMN next_device INTEGER NOT NULL DEFAULT 2", []);
+    // Linked devices' own login keys (the identity key is shared, so it can't tell devices apart).
+    let _ = db.execute("ALTER TABLE devices ADD COLUMN key TEXT", []);
+    if !has("messages", "device") {
+        db.execute_batch(
+            "ALTER TABLE messages ADD COLUMN device INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE messages ADD COLUMN sender_device INTEGER NOT NULL DEFAULT 1;",
+        )
+        .expect("migrate messages");
+    }
+    db.execute("CREATE INDEX IF NOT EXISTS messages_device ON messages(recipient, device, id)", []).expect("index");
+    for (table, cols) in [("prekeys", "id, key"), ("kyber_prekeys", "id, key, sig")] {
+        if has(table, "device") {
+            continue;
+        }
+        let def = if table == "prekeys" { "id INTEGER NOT NULL, key TEXT NOT NULL" } else { "id INTEGER NOT NULL, key TEXT NOT NULL, sig TEXT NOT NULL" };
+        db.execute_batch(&format!(
+            "BEGIN;
+             CREATE TABLE {table}_v2(account TEXT NOT NULL, device INTEGER NOT NULL, {def}, PRIMARY KEY(account, device, id));
+             INSERT INTO {table}_v2(account, device, {cols}) SELECT account, 1, {cols} FROM {table};
+             DROP TABLE {table};
+             ALTER TABLE {table}_v2 RENAME TO {table};
+             COMMIT;"
+        ))
+        .expect("migrate prekeys");
+    }
+    db.execute(
+        "INSERT OR IGNORE INTO devices(account, id, keys, name, created, seen) SELECT id, 1, keys, NULL, created, created FROM accounts",
+        [],
+    )
+    .expect("migrate devices");
+}
+
+/// Devices that can receive messages (they've uploaded keys).
+fn active_devices(db: &Connection, account: &str) -> Vec<u32> {
+    let mut st = db.prepare_cached("SELECT id FROM devices WHERE account=? AND keys IS NOT NULL ORDER BY id").expect("query");
+    st.query_map([account], |r| r.get(0)).and_then(|rows| rows.collect()).unwrap_or_default()
+}
+
+/// Remove a device: its keys, queue and connection. Its owner's other devices refresh their lists.
+fn remove_device(app: &App, db: &Connection, account: &str, device: u32) -> Result<(), String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    db.execute("DELETE FROM devices WHERE account=? AND id=?", params![account, device]).map_err(e)?;
+    db.execute("DELETE FROM prekeys WHERE account=? AND device=?", params![account, device]).map_err(e)?;
+    db.execute("DELETE FROM kyber_prekeys WHERE account=? AND device=?", params![account, device]).map_err(e)?;
+    db.execute("DELETE FROM messages WHERE recipient=? AND device=?", params![account, device]).map_err(e)?;
+    let key = format!("{account}.{device}");
+    if let Some(c) = app.online.lock().unwrap().remove(&key) {
+        let _ = c.tx.send(json!({"t": "unlinked"}).to_string());
+        c.end.cancel();
+    }
+    let mut links = app.links.lock().unwrap();
+    if links.get(account).is_some_and(|l| l.device == device) {
+        links.remove(account);
+    }
+    Ok(())
+}
+
+/// Device-management calls need the main-device key on record (older accounts get it at first login).
+fn has_main_key(db: &Connection, account: &str) -> bool {
+    db.query_row("SELECT main IS NOT NULL FROM accounts WHERE id=?", [account], |r| r.get(0)).unwrap_or(false)
+}
+
+/// The device is still on the account. Checked on every request, so an unlinked device can't carry on.
+fn device_exists(app: &App, account: &str, device: u32) -> bool {
+    device == MAIN_DEVICE || app.db.lock().unwrap().query_row("SELECT 1 FROM devices WHERE account=? AND id=?", params![account, device], |_| Ok(())).optional().ok().flatten().is_some()
+}
+
+fn push_all(app: &App, account: &str, v: Value) {
+    let prefix = format!("{account}.");
+    let msg = v.to_string();
+    for (k, c) in app.online.lock().unwrap().iter() {
+        if k.starts_with(&prefix) {
+            let _ = c.tx.send(msg.clone());
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct DeviceMsg {
+    device: u32,
+    body: String,
+}
+
+/// A send must cover exactly the recipient's current devices (minus the sender's own device when
+/// writing to yourself), so a stale device list is corrected instead of silently missing a device.
+fn check_devices(db: &Connection, to: &str, skip: Option<u32>, msgs: &[DeviceMsg]) -> Result<(), Value> {
+    let want: Vec<u32> = active_devices(db, to).into_iter().filter(|d| Some(*d) != skip).collect();
+    let got: Vec<u32> = msgs.iter().map(|m| m.device).collect();
+    let missing: Vec<u32> = want.iter().copied().filter(|d| !got.contains(d)).collect();
+    let extra: Vec<u32> = got.iter().copied().filter(|d| !want.contains(d)).collect();
+    let dup = (1..got.len()).any(|i| got[..i].contains(&got[i]));
+    if missing.is_empty() && extra.is_empty() && !dup {
+        Ok(())
+    } else {
+        Err(json!({"error": "devices", "missing": missing, "extra": extra}))
+    }
+}
+
+/// Linking, new-device side: an anonymous socket that receives one end-to-end encrypted transfer
+/// from the main device (which scanned this channel's id from a QR code), then closes.
+async fn link_upgrade(ws: WebSocketUpgrade, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, State(app): State<Shared>) -> Response {
+    let ip = client_ip(&app, &headers, peer);
+    if !app.limits.allow(&format!("link:{}", ip_key(ip)), 0.1, 10.0) || !app.limits.allow(&format!("link48:{}", ip_key48(ip)), 0.5, 50.0) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    ws.max_message_size(1024).on_upgrade(move |mut sock| async move {
+        let id: String = rand::random::<[u8; 16]>().iter().map(|b| format!("{b:02x}")).collect();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        {
+            let mut ch = app.channels.lock().unwrap();
+            ch.retain(|_, (_, at)| at.elapsed() < LINK_CHANNEL_LIFE);
+            if ch.len() >= 10_000 {
+                return;
+            }
+            ch.insert(id.clone(), (tx, Instant::now()));
+        }
+        if send(&mut sock, json!({"t": "channel", "id": id})).await.is_ok() {
+            if let Ok(Some(body)) = tokio::time::timeout(LINK_CHANNEL_LIFE, rx.recv()).await {
+                let _ = send(&mut sock, json!({"t": "provision", "body": body})).await;
+            }
+        }
+        app.channels.lock().unwrap().remove(&id);
+    })
 }
 
 /// Hourly: expire undelivered messages and old attachment blobs, forget stale rate-limit buckets.
@@ -312,7 +477,11 @@ fn rotate_server_cert(db: &Connection, trust_file: &str) {
 #[derive(Deserialize)]
 struct SealedSend {
     to: String,
-    body: String,
+    /// One copy per recipient device. (`body` alone: older clients, delivered to device 1.)
+    #[serde(default)]
+    msgs: Vec<DeviceMsg>,
+    #[serde(default)]
+    body: Option<String>,
     access: String,
 }
 
@@ -328,11 +497,15 @@ async fn post_sealed(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(
     if !valid_id(&req.to) || req.access.len() > 64 {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    if req.body.len() > MAX_BODY {
+    let msgs = match req.body {
+        Some(body) if req.msgs.is_empty() => vec![DeviceMsg { device: MAIN_DEVICE, body }],
+        _ => req.msgs,
+    };
+    if msgs.iter().map(|m| m.body.len()).sum::<usize>() > MAX_BODY * MAX_DEVICES as usize || msgs.iter().any(|m| m.body.len() > MAX_BODY) {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     let ts = now_ms();
-    let id = {
+    let ids = {
         let db = app.db.lock().unwrap();
         let access: Option<Option<String>> = db.query_row("SELECT access FROM accounts WHERE id=?", [&req.to], |r| r.get(0)).optional().ok().flatten();
         let ok = access.flatten().is_some_and(|a| a.len() == req.access.len() && a.bytes().zip(req.access.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0);
@@ -343,16 +516,25 @@ async fn post_sealed(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(
         if !app.limits.allow(&format!("sealed-to:{}", req.to), 20.0, 300.0) {
             return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
+        if let Err(mismatch) = check_devices(&db, &req.to, None, &msgs) {
+            return (StatusCode::CONFLICT, axum::Json(mismatch)).into_response();
+        }
         if queue_full(&db, &req.to) {
             return StatusCode::INSUFFICIENT_STORAGE.into_response();
         }
-        if db.execute("INSERT INTO messages(recipient, sender, body, ts) VALUES(?, '', ?, ?)", params![req.to, req.body, ts]).is_err() {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        let mut ids = vec![];
+        for m in &msgs {
+            if db.execute("INSERT INTO messages(recipient, device, sender, sender_device, body, ts) VALUES(?, ?, '', 0, ?, ?)", params![req.to, m.device, m.body, ts]).is_err() {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            ids.push(db.last_insert_rowid());
         }
-        db.last_insert_rowid()
+        ids
     };
-    push(&app, &req.to, json!({"t": "msg", "id": id, "from": null, "sealed": true, "body": req.body, "ts": ts}));
-    (StatusCode::CREATED, axum::Json(json!({"id": id, "ts": ts}))).into_response()
+    for (m, id) in msgs.iter().zip(&ids) {
+        push(&app, &req.to, m.device, json!({"t": "msg", "id": id, "from": null, "sealed": true, "body": m.body, "ts": ts}));
+    }
+    (StatusCode::CREATED, axum::Json(json!({"ts": ts}))).into_response()
 }
 
 fn client_ip(app: &App, headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
@@ -374,6 +556,17 @@ fn ip_key(ip: IpAddr) -> String {
         }
         IpAddr::V6(v6) => v6.to_ipv4_mapped().unwrap().to_string(),
         v4 => v4.to_string(),
+    }
+}
+
+/// Coarser key for limits that a whole IPv6 allocation (/48) shares.
+fn ip_key48(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V6(v6) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}::/48", s[0], s[1], s[2])
+        }
+        other => ip_key(other),
     }
 }
 
@@ -539,6 +732,73 @@ fn auth_message(host: &str, nonce: &str) -> Vec<u8> {
 struct Auth {
     id: String,
     sig: String,
+    #[serde(default = "main_device")]
+    device: u32,
+    /// Device 1: the main-device public key and a signature with it over the same challenge.
+    #[serde(default)]
+    main: Option<String>,
+    #[serde(default)]
+    msig: Option<String>,
+    /// A new linked device's first login: the token the main device got from `link_begin`.
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    /// Linked devices: their own login key (registered with the link token) and a signature with it.
+    #[serde(default)]
+    dkey: Option<String>,
+    #[serde(default)]
+    dsig: Option<String>,
+}
+
+fn main_device() -> u32 {
+    MAIN_DEVICE
+}
+
+/// Which devices may log in. Every device holds the identity key, so that alone can't tell them
+/// apart: device 1 must also sign with the main-device key (derived from the recovery phrase, which
+/// linked devices never get), and linked devices must be on the account's device list.
+fn authorize(app: &App, me: &str, auth: &Auth, challenge: &[u8]) -> Result<(), &'static str> {
+    let db = app.db.lock().unwrap();
+    if !(1..=127).contains(&auth.device) {
+        return Err("bad_auth");
+    }
+    let main: Option<Option<String>> = db.query_row("SELECT main FROM accounts WHERE id=?", [me], |r| r.get(0)).optional().map_err(|_| "bad_auth")?;
+    if auth.device == MAIN_DEVICE {
+        let signed = |key: &str| auth.msig.as_ref().and_then(|s| B64.decode(s).ok()).is_some_and(|s| verify(key, challenge, &s));
+        return match main.flatten() {
+            Some(key) => signed(&key).then_some(()).ok_or("bad_auth"),
+            // First login since multi-device (or a new account): remember the main-device key.
+            None => match &auth.main {
+                Some(key) if signed(key) => {
+                    // Existing account: record it now (a brand-new one gets it when it's created).
+                    db.execute("UPDATE accounts SET main=? WHERE id=? AND main IS NULL", params![key, me]).map_err(|_| "bad_auth")?;
+                    Ok(())
+                }
+                Some(_) => Err("bad_auth"),
+                // ponytail: older clients log in without it until they reload; drop once they're gone.
+                None => Ok(()),
+            },
+        };
+    }
+    // Linked devices sign with their own login key, so knowing the identity key isn't enough to
+    // sign in as one (for instance, from a device that's been unlinked).
+    let device_signed = |key: &str| auth.dsig.as_ref().and_then(|s| B64.decode(s).ok()).is_some_and(|s| verify(key, challenge, &s));
+    let known: Option<Option<String>> = db.query_row("SELECT key FROM devices WHERE account=? AND id=?", params![me, auth.device], |r| r.get(0)).optional().map_err(|_| "bad_auth")?;
+    if let Some(key) = known {
+        return match key {
+            Some(key) if device_signed(&key) => Ok(()),
+            _ => Err("unlinked"),
+        };
+    }
+    let mut links = app.links.lock().unwrap();
+    let ok = links.get(me).is_some_and(|l| l.device == auth.device && l.expires > Instant::now() && auth.token.as_deref() == Some(l.token.as_str()));
+    let Some(dkey) = auth.dkey.as_ref().filter(|k| ok && valid_id(k) && device_signed(k)) else { return Err("unlinked") };
+    links.remove(me);
+    let name: Option<String> = auth.name.as_ref().map(|n| n.chars().take(64).collect());
+    db.execute("INSERT INTO devices(account, id, keys, name, created, seen, key) VALUES(?, ?, NULL, ?, ?, ?, ?)", params![me, auth.device, name, now_ms(), now_ms(), dkey])
+        .map_err(|_| "bad_auth")?;
+    Ok(())
 }
 
 async fn conn(app: Shared, mut sock: WebSocket, host: String, ip: IpAddr) -> Result<(), String> {
@@ -549,15 +809,31 @@ async fn conn(app: Shared, mut sock: WebSocket, host: String, ip: IpAddr) -> Res
     let Some(Ok(Message::Text(text))) = first else { return Err("no auth".into()) };
     let auth: Auth = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let sig = B64.decode(&auth.sig).map_err(|e| e.to_string())?;
-    if !verify(&auth.id, &auth_message(&host, &nonce), &sig) {
+    let challenge = auth_message(&host, &nonce);
+    if !verify(&auth.id, &challenge, &sig) {
         send(&mut sock, json!({"t": "error", "error": "bad_auth"})).await?;
         return Err("bad auth".into());
     }
-    let me = auth.id;
+    if let Err(why) = authorize(&app, &auth.id, &auth, &challenge) {
+        send(&mut sock, json!({"t": "error", "error": why})).await?;
+        return Err(why.into());
+    }
+    let me = auth.id.clone();
+    let device = auth.device;
+    // Devices name themselves ("Chrome on macOS") so the device list is readable.
+    if let Some(name) = auth.name.as_ref().map(|n| n.chars().take(64).collect::<String>()) {
+        let _ = app.db.lock().unwrap().execute("UPDATE devices SET name=? WHERE account=? AND id=?", params![name, me, device]);
+    }
+    // authorize() checked msig against `main` for device 1.
+    let main_key = if device == MAIN_DEVICE { auth.main.clone().filter(|_| auth.msig.is_some()) } else { None };
+    let key = format!("{me}.{device}");
 
-    // A newer connection for the same account replaces this one (dropping the old sender ends it).
+    // A newer connection for the same device replaces this one.
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    app.online.lock().unwrap().insert(me.clone(), tx.clone());
+    let end = tokio_util::sync::CancellationToken::new();
+    if let Some(old) = app.online.lock().unwrap().insert(key.clone(), Online { tx: tx.clone(), end: end.clone() }) {
+        old.end.cancel();
+    }
 
     let (username, registered, prekeys, kyber, queued) = {
         let db = app.db.lock().unwrap();
@@ -566,26 +842,27 @@ async fn conn(app: Shared, mut sock: WebSocket, host: String, ip: IpAddr) -> Res
             .optional()
             .map_err(|e| e.to_string())?;
         let prekeys: i64 = db
-            .query_row("SELECT count(*) FROM prekeys WHERE account=?", [&me], |r| r.get(0))
+            .query_row("SELECT count(*) FROM prekeys WHERE account=? AND device=?", params![me, device], |r| r.get(0))
             .map_err(|e| e.to_string())?;
         let kyber: i64 = db
-            .query_row("SELECT count(*) FROM kyber_prekeys WHERE account=?", [&me], |r| r.get(0))
+            .query_row("SELECT count(*) FROM kyber_prekeys WHERE account=? AND device=?", params![me, device], |r| r.get(0))
             .map_err(|e| e.to_string())?;
+        let _ = db.execute("UPDATE devices SET seen=? WHERE account=? AND id=?", params![now_ms(), me, device]);
         let mut stmt = db
-            .prepare("SELECT id, sender, body, ts FROM messages WHERE recipient=? ORDER BY id")
+            .prepare("SELECT id, sender, sender_device, body, ts FROM messages WHERE recipient=? AND device=? ORDER BY id")
             .map_err(|e| e.to_string())?;
         let queued: Vec<Value> = stmt
-            .query_map([&me], |r| {
+            .query_map(params![me, device], |r| {
                 let from: String = r.get(1)?;
                 let sealed = from.is_empty();
                 Ok(json!({"t": "msg", "id": r.get::<_, i64>(0)?, "from": if sealed { Value::Null } else { from.into() },
-                          "sealed": sealed, "body": r.get::<_, String>(2)?, "ts": r.get::<_, i64>(3)?}))
+                          "dev": r.get::<_, u32>(2)?, "sealed": sealed, "body": r.get::<_, String>(3)?, "ts": r.get::<_, i64>(4)?}))
             })
             .and_then(|rows| rows.collect())
             .map_err(|e| e.to_string())?;
         (username.clone().flatten(), username.is_some(), prekeys, kyber, queued)
     };
-    send(&mut sock, json!({"t": "ready", "registered": registered, "username": username, "prekeys": prekeys, "kyber": kyber, "pow": app.pow_bits, "trust": B64.encode(&app.trust_root)})).await?;
+    send(&mut sock, json!({"t": "ready", "registered": registered, "device": device, "username": username, "prekeys": prekeys, "kyber": kyber, "pow": app.pow_bits, "trust": B64.encode(&app.trust_root)})).await?;
     for m in queued {
         send(&mut sock, m).await?;
     }
@@ -610,7 +887,7 @@ async fn conn(app: Shared, mut sock: WebSocket, host: String, ip: IpAddr) -> Res
                             continue;
                         }
                     }
-                    let reply = handle(&app, &Ctx { me: &me, host: &host, nonce: &nonce, ip }, &text);
+                    let reply = handle(&app, &Ctx { me: &me, device, main: main_key.as_deref(), host: &host, nonce: &nonce, ip }, &text);
                     if let Err(e) = send(&mut sock, reply).await { break Err(e) }
                 }
                 Some(Ok(Message::Close(_))) | None => break Ok(()),
@@ -621,12 +898,19 @@ async fn conn(app: Shared, mut sock: WebSocket, host: String, ip: IpAddr) -> Res
                 Some(text) => if let Err(e) = sock.send(Message::Text(text.into())).await { break Err(e.to_string()) },
                 None => break Ok(()),
             },
+            // Unlinked, or replaced by a newer login: deliver what's queued (e.g. "unlinked"), then go.
+            _ = end.cancelled() => {
+                while let Ok(text) = rx.try_recv() {
+                    let _ = sock.send(Message::Text(text.into())).await;
+                }
+                break Ok(());
+            }
         }
     };
     drop(rx);
     let mut online = app.online.lock().unwrap();
-    if online.get(&me).is_some_and(|t| t.same_channel(&tx)) {
-        online.remove(&me);
+    if online.get(&key).is_some_and(|c| c.tx.same_channel(&tx)) {
+        online.remove(&key);
     }
     result
 }
@@ -677,8 +961,22 @@ enum Req {
     Username { name: String },
     Lookup { name: String },
     Profile { id: String },
-    Bundle { id: String },
-    Send { to: String, body: String },
+    /// One device's prekey bundle (device 1 if omitted).
+    Bundle {
+        id: String,
+        #[serde(default)]
+        device: Option<u32>,
+    },
+    /// Every device's bundle (yours: all but this device).
+    Bundles { id: String },
+    /// One copy per recipient device. (`body` alone: older clients, delivered to device 1.)
+    Send {
+        to: String,
+        #[serde(default)]
+        msgs: Vec<DeviceMsg>,
+        #[serde(default)]
+        body: Option<String>,
+    },
     Ack { id: i64 },
     /// Reserve a one-time slot to upload an encrypted attachment of at most `size` bytes.
     Upload { size: u64 },
@@ -690,6 +988,14 @@ enum Req {
     Cert,
     /// Register the access key that gates sealed delivery to us.
     Access { key: String },
+    /// Your devices.
+    Devices,
+    /// Main device: approve linking one new device. Returns its device id and a one-time token.
+    LinkBegin,
+    /// Main device: hand the encrypted transfer to the new device's link channel.
+    Provision { channel: String, body: String },
+    /// Main device: remove any linked device. Linked devices: remove themselves.
+    Unlink { device: u32 },
 }
 
 #[derive(Deserialize)]
@@ -716,7 +1022,9 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
     let (bucket, rate, burst) = match &rpc.req {
         Req::Send { .. } => ("send", 20.0, 200.0),
         Req::Lookup { .. } | Req::Profile { .. } => ("lookup", 1.0, 60.0),
-        Req::Bundle { .. } => ("bundle", 1.0, 100.0),
+        Req::Bundle { .. } | Req::Bundles { .. } => ("bundle", 1.0, 100.0),
+        Req::Devices => ("devices", 1.0, 30.0),
+        Req::LinkBegin | Req::Provision { .. } | Req::Unlink { .. } => ("link", 0.05, 10.0),
         Req::Upload { .. } => ("upload", 0.5, 60.0),
         Req::Keys { .. } => ("keys", 0.2, 10.0),
         Req::Username { .. } => ("username", 0.1, 10.0),
@@ -734,7 +1042,13 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
     if !matches!(rpc.req, Req::Keys { .. } | Req::Ack { .. }) && !is_registered(app, me) {
         return json!({"rid": rpc.rid, "error": "not_registered"});
     }
-    if matches!(rpc.req, Req::Lookup { .. } | Req::Profile { .. } | Req::Bundle { .. }) && !app.limits.allow(&format!("{bucket}-ip:{}", ip_key(cx.ip)), 3.0, 300.0) {
+    if !device_exists(app, me, cx.device) {
+        return json!({"rid": rpc.rid, "error": "unlinked"});
+    }
+    if matches!(rpc.req, Req::Username { .. }) && cx.device != MAIN_DEVICE {
+        return json!({"rid": rpc.rid, "error": "main_only"});
+    }
+    if matches!(rpc.req, Req::Lookup { .. } | Req::Profile { .. } | Req::Bundle { .. } | Req::Bundles { .. }) && !app.limits.allow(&format!("{bucket}-ip:{}", ip_key(cx.ip)), 3.0, 300.0) {
         return json!({"rid": rpc.rid, "error": "slow_down"});
     }
     if let Req::Send { to, .. } = &rpc.req {
@@ -743,10 +1057,28 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
         }
     }
     let mut out = match rpc.req {
-        Req::Send { to, body } => send_msg(app, me, &to, &body),
+        Req::Send { to, msgs, body } => {
+            let msgs = match body {
+                Some(body) if msgs.is_empty() => vec![DeviceMsg { device: MAIN_DEVICE, body }],
+                _ => msgs,
+            };
+            send_msg(app, cx, &to, &msgs)
+        }
         Req::Ice => Ok(ice(app, me, cx.host)),
-        Req::Cert => fog_core::sealed::sender_certificate(&app.server_cert, &app.server_key, me, (now_ms() + 86_400_000) as u64)
-            .map(|c| json!({ "cert": B64.encode(c), "expires": now_ms() + 86_400_000 })),
+        Req::Provision { channel, body } => {
+            if cx.device != MAIN_DEVICE || !has_main_key(&app.db.lock().unwrap(), me) {
+                Err("main_only".into())
+            } else if body.len() > MAX_BODY {
+                Err("too_large".into())
+            } else {
+                match app.channels.lock().unwrap().remove(&channel) {
+                    Some((tx, _)) => tx.send(body).map(|_| json!({})).map_err(|_| "gone".to_string()),
+                    None => Err("gone".into()),
+                }
+            }
+        }
+        Req::Cert => fog_core::sealed::sender_certificate(&app.server_cert, &app.server_key, me, cx.device, (now_ms() + CERT_LIFE_MS) as u64)
+            .map(|c| json!({ "cert": B64.encode(c), "expires": now_ms() + CERT_LIFE_MS })),
         req => {
             let db = app.db.lock().unwrap();
             rpc_db(&db, app, cx, req)
@@ -814,6 +1146,9 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
             }
             // New accounts cost a little CPU (proof-of-work) and are capped per IP.
             let exists = db.query_row("SELECT 1 FROM accounts WHERE id=?", [me], |_| Ok(())).optional().map_err(e)?.is_some();
+            if !exists && cx.device != MAIN_DEVICE {
+                return Err("not_registered".into());
+            }
             if !exists {
                 if !pow.is_some_and(|c| pow_ok(cx.nonce, c, app.pow_bits)) {
                     return Err("pow_required".into());
@@ -825,24 +1160,42 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
             let stored = json!({"reg": keys.reg,
                 "spk": {"id": keys.spk.id, "pub": keys.spk.key, "sig": keys.spk.sig},
                 "kpk": {"id": keys.kpk.id, "pub": keys.kpk.key, "sig": keys.kpk.sig}});
-            db.execute(
-                "INSERT INTO accounts(id, keys, created) VALUES(?1, ?2, ?3)
-                 ON CONFLICT(id) DO UPDATE SET keys=excluded.keys",
-                params![me, stored.to_string(), now_ms()],
-            )
-            .map_err(e)?;
+            if !exists {
+                db.execute("INSERT INTO accounts(id, keys, created, main) VALUES(?1, '{}', ?2, ?3)", params![me, now_ms(), cx.main]).map_err(e)?;
+            }
+            if cx.device == MAIN_DEVICE {
+                db.execute(
+                    "INSERT INTO devices(account, id, keys, created, seen) VALUES(?1, ?2, ?3, ?4, ?4)
+                     ON CONFLICT(account, id) DO UPDATE SET keys=excluded.keys",
+                    params![me, cx.device, stored.to_string(), now_ms()],
+                )
+                .map_err(e)?;
+            // A linked device only updates its own row: once unlinked it can't put itself back.
+            } else if db.execute("UPDATE devices SET keys=? WHERE account=? AND id=?", params![stored.to_string(), me, cx.device]).map_err(e)? == 0 {
+                return Err("unlinked".into());
+            }
             if replace {
-                db.execute("DELETE FROM prekeys WHERE account=?", [me]).map_err(e)?;
-                db.execute("DELETE FROM kyber_prekeys WHERE account=?", [me]).map_err(e)?;
+                db.execute("DELETE FROM prekeys WHERE account=? AND device=?", params![me, cx.device]).map_err(e)?;
+                db.execute("DELETE FROM kyber_prekeys WHERE account=? AND device=?", params![me, cx.device]).map_err(e)?;
+                // A fresh main device (new account, or restored from the recovery phrase) signs out
+                // every linked device, as in Signal: that's how you recover a lost or stolen one.
+                if cx.device == MAIN_DEVICE {
+                    app.links.lock().unwrap().remove(me);
+                    let others: Vec<u32> = active_devices(db, me).into_iter().chain(pending_devices(db, me)).filter(|d| *d != MAIN_DEVICE).collect();
+                    for d in others {
+                        remove_device(app, db, me, d)?;
+                    }
+                }
             }
             for k in keys.pks {
-                db.execute("INSERT OR REPLACE INTO prekeys(account, id, key) VALUES(?, ?, ?)", params![me, k.id, k.key])
+                db.execute("INSERT OR REPLACE INTO prekeys(account, device, id, key) VALUES(?, ?, ?, ?)", params![me, cx.device, k.id, k.key])
                     .map_err(e)?;
             }
             for k in keys.kpks {
-                db.execute("INSERT OR REPLACE INTO kyber_prekeys(account, id, key, sig) VALUES(?, ?, ?, ?)", params![me, k.id, k.key, k.sig])
+                db.execute("INSERT OR REPLACE INTO kyber_prekeys(account, device, id, key, sig) VALUES(?, ?, ?, ?, ?)", params![me, cx.device, k.id, k.key, k.sig])
                     .map_err(e)?;
             }
+            push_all(app, me, json!({"t": "devices"}));
             Ok(json!({}))
         }
         Req::Username { name } => {
@@ -872,45 +1225,51 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
             .map_err(e)?
             .map(|u| json!({"id": id, "username": u}))
             .ok_or_else(|| "not_found".into()),
-        Req::Bundle { id } => {
-            let keys: String = db
-                .query_row("SELECT keys FROM accounts WHERE id=?", [&id], |r| r.get(0))
-                .optional()
-                .map_err(e)?
-                .ok_or("not_found")?;
-            let mut bundle: Value = serde_json::from_str(&keys).map_err(|x| x.to_string())?;
-            let pk: Option<(u32, String)> = db
-                .query_row(
-                    "DELETE FROM prekeys WHERE rowid = (SELECT rowid FROM prekeys WHERE account=? LIMIT 1) RETURNING id, key",
-                    [&id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .map_err(e)?;
-            if let Some((pid, key)) = pk {
-                bundle["pk"] = json!({"id": pid, "pub": key});
+        Req::Bundle { id, device } => Ok(json!({"bundle": bundle(app, db, &id, device.unwrap_or(MAIN_DEVICE))?})),
+        Req::Bundles { id } => {
+            let devices: Vec<u32> = active_devices(db, &id).into_iter().filter(|d| !(id == me && *d == cx.device)).collect();
+            if devices.is_empty() && id != me {
+                return Err("not_found".into());
             }
-            // Prefer a one-time post-quantum prekey; fall back to the signed last-resort one.
-            let kpk: Option<(u32, String, String)> = db
-                .query_row(
-                    "DELETE FROM kyber_prekeys WHERE rowid = (SELECT rowid FROM kyber_prekeys WHERE account=? LIMIT 1) RETURNING id, key, sig",
-                    [&id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()
-                .map_err(e)?;
-            if let Some((kid, key, sig)) = kpk {
-                bundle["kpk"] = json!({"id": kid, "pub": key, "sig": sig});
-            }
-            let left: i64 = db.query_row("SELECT count(*) FROM prekeys WHERE account=?", [&id], |r| r.get(0)).map_err(e)?;
-            let kleft: i64 = db.query_row("SELECT count(*) FROM kyber_prekeys WHERE account=?", [&id], |r| r.get(0)).map_err(e)?;
-            if left < 20 || kleft < 10 {
-                push(app, &id, json!({"t": "prekeys", "count": left, "kyber": kleft}));
-            }
-            Ok(json!({"bundle": bundle}))
+            let bundles: Result<Vec<Value>, String> = devices.into_iter().map(|d| Ok(json!({"device": d, "bundle": bundle(app, db, &id, d)?}))).collect();
+            Ok(json!({"bundles": bundles?}))
         }
         Req::Ack { id } => {
-            db.execute("DELETE FROM messages WHERE id=? AND recipient=?", params![id, me]).map_err(e)?;
+            db.execute("DELETE FROM messages WHERE id=? AND recipient=? AND device=?", params![id, me, cx.device]).map_err(e)?;
+            Ok(json!({}))
+        }
+        Req::Devices => {
+            let mut st = db.prepare("SELECT id, name, created, seen, keys IS NOT NULL FROM devices WHERE account=? ORDER BY id").map_err(e)?;
+            let list: Vec<Value> = st
+                .query_map([me], |r| Ok(json!({"id": r.get::<_, u32>(0)?, "name": r.get::<_, Option<String>>(1)?, "created": r.get::<_, i64>(2)?, "seen": r.get::<_, i64>(3)?, "ready": r.get::<_, bool>(4)?})))
+                .and_then(|rows| rows.collect())
+                .map_err(e)?;
+            Ok(json!({"devices": list, "me": cx.device}))
+        }
+        Req::LinkBegin => {
+            if cx.device != MAIN_DEVICE || !has_main_key(db, me) {
+                return Err("main_only".into());
+            }
+            let count: i64 = db.query_row("SELECT count(*) FROM devices WHERE account=?", [me], |r| r.get(0)).map_err(e)?;
+            if count >= MAX_DEVICES {
+                return Err("too_many_devices".into());
+            }
+            // Device ids aren't reused: contacts may still hold a session with an unlinked one.
+            let device: u32 = db.query_row("SELECT next_device FROM accounts WHERE id=?", [me], |r| r.get(0)).map_err(e)?;
+            if device > 127 {
+                return Err("too_many_devices".into());
+            }
+            db.execute("UPDATE accounts SET next_device=? WHERE id=?", params![device + 1, me]).map_err(e)?;
+            let token = B64URL.encode(rand::random::<[u8; 24]>());
+            app.links.lock().unwrap().insert(me.to_owned(), Link { device, token: token.clone(), expires: Instant::now() + Duration::from_secs(600) });
+            Ok(json!({"device": device, "token": token}))
+        }
+        Req::Unlink { device } => {
+            if device == MAIN_DEVICE || (cx.device != MAIN_DEVICE && device != cx.device) || (cx.device == MAIN_DEVICE && !has_main_key(db, me)) {
+                return Err("not_allowed".into());
+            }
+            remove_device(app, db, me, device)?;
+            push_all(app, me, json!({"t": "devices"}));
             Ok(json!({}))
         }
         Req::Upload { size } => {
@@ -940,8 +1299,54 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
             db.execute("UPDATE accounts SET access=? WHERE id=?", params![key, me]).map_err(e)?;
             Ok(json!({}))
         }
-        Req::Send { .. } | Req::Ice | Req::Cert => unreachable!("handled in handle()"),
+        Req::Send { .. } | Req::Ice | Req::Cert | Req::Provision { .. } => unreachable!("handled in handle()"),
     }
+}
+
+/// Devices approved but not yet set up (no keys uploaded).
+fn pending_devices(db: &Connection, account: &str) -> Vec<u32> {
+    let mut st = db.prepare_cached("SELECT id FROM devices WHERE account=? AND keys IS NULL").expect("query");
+    st.query_map([account], |r| r.get(0)).and_then(|rows| rows.collect()).unwrap_or_default()
+}
+
+/// A device's prekey bundle, consuming one one-time EC and one one-time Kyber prekey if available.
+fn bundle(app: &App, db: &Connection, id: &str, device: u32) -> Result<Value, String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    let keys: String = db
+        .query_row("SELECT keys FROM devices WHERE account=? AND id=? AND keys IS NOT NULL", params![id, device], |r| r.get(0))
+        .optional()
+        .map_err(e)?
+        .ok_or("not_found")?;
+    let mut bundle: Value = serde_json::from_str(&keys).map_err(|x| x.to_string())?;
+    let pk: Option<(u32, String)> = db
+        .query_row(
+            "DELETE FROM prekeys WHERE rowid = (SELECT rowid FROM prekeys WHERE account=? AND device=? LIMIT 1) RETURNING id, key",
+            params![id, device],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(e)?;
+    if let Some((pid, key)) = pk {
+        bundle["pk"] = json!({"id": pid, "pub": key});
+    }
+    // Prefer a one-time post-quantum prekey; fall back to the signed last-resort one.
+    let kpk: Option<(u32, String, String)> = db
+        .query_row(
+            "DELETE FROM kyber_prekeys WHERE rowid = (SELECT rowid FROM kyber_prekeys WHERE account=? AND device=? LIMIT 1) RETURNING id, key, sig",
+            params![id, device],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(e)?;
+    if let Some((kid, key, sig)) = kpk {
+        bundle["kpk"] = json!({"id": kid, "pub": key, "sig": sig});
+    }
+    let left: i64 = db.query_row("SELECT count(*) FROM prekeys WHERE account=? AND device=?", params![id, device], |r| r.get(0)).map_err(e)?;
+    let kleft: i64 = db.query_row("SELECT count(*) FROM kyber_prekeys WHERE account=? AND device=?", params![id, device], |r| r.get(0)).map_err(e)?;
+    if left < 20 || kleft < 10 {
+        push(app, id, device, json!({"t": "prekeys", "count": left, "kyber": kleft}));
+    }
+    Ok(bundle)
 }
 
 /// A recipient's offline queue is capped by count and bytes, so nobody can fill it to lock them out.
@@ -950,12 +1355,13 @@ fn queue_full(db: &Connection, to: &str) -> bool {
         .map_or(true, |(n, bytes)| n >= MAX_QUEUED_PER_RECIPIENT || bytes >= MAX_QUEUED_BYTES)
 }
 
-fn send_msg(app: &App, me: &str, to: &str, body: &str) -> Result<Value, String> {
-    if body.len() > MAX_BODY {
+fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg]) -> Result<Value, String> {
+    if msgs.iter().any(|m| m.body.len() > MAX_BODY) {
         return Err("too_large".into());
     }
+    let me = cx.me;
     let ts = now_ms();
-    let id = {
+    let ids = {
         let db = app.db.lock().unwrap();
         let exists: bool = db
             .query_row("SELECT 1 FROM accounts WHERE id=?", [to], |_| Ok(true))
@@ -965,26 +1371,71 @@ fn send_msg(app: &App, me: &str, to: &str, body: &str) -> Result<Value, String> 
         if !exists {
             return Err("not_found".into());
         }
+        if let Err(mismatch) = check_devices(&db, to, (to == me).then_some(cx.device), msgs) {
+            return Ok(mismatch);
+        }
         if queue_full(&db, to) {
             return Err("recipient_full".into());
         }
-        db.execute("INSERT INTO messages(recipient, sender, body, ts) VALUES(?, ?, ?, ?)", params![to, me, body, ts])
-            .map_err(|e| e.to_string())?;
-        db.last_insert_rowid()
+        let mut ids = vec![];
+        for m in msgs {
+            db.execute("INSERT INTO messages(recipient, device, sender, sender_device, body, ts) VALUES(?, ?, ?, ?, ?, ?)", params![to, m.device, me, cx.device, m.body, ts])
+                .map_err(|e| e.to_string())?;
+            ids.push(db.last_insert_rowid());
+        }
+        ids
     };
-    push(app, to, json!({"t": "msg", "id": id, "from": me, "body": body, "ts": ts}));
-    Ok(json!({"id": id, "ts": ts}))
+    for (m, id) in msgs.iter().zip(&ids) {
+        push(app, to, m.device, json!({"t": "msg", "id": id, "from": me, "dev": cx.device, "body": m.body, "ts": ts}));
+    }
+    Ok(json!({"ts": ts}))
 }
 
-fn push(app: &App, to: &str, v: Value) {
-    if let Some(tx) = app.online.lock().unwrap().get(to) {
-        let _ = tx.send(v.to_string());
+fn push(app: &App, to: &str, device: u32, v: Value) {
+    if let Some(c) = app.online.lock().unwrap().get(&format!("{to}.{device}")) {
+        let _ = c.tx.send(v.to_string());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_device_database_migrates_to_device_1() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE accounts(id TEXT PRIMARY KEY, username TEXT UNIQUE, keys TEXT NOT NULL, created INTEGER NOT NULL, access TEXT);
+             CREATE TABLE prekeys(account TEXT NOT NULL, id INTEGER NOT NULL, key TEXT NOT NULL, PRIMARY KEY(account, id));
+             CREATE TABLE kyber_prekeys(account TEXT NOT NULL, id INTEGER NOT NULL, key TEXT NOT NULL, sig TEXT NOT NULL, PRIMARY KEY(account, id));
+             CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, ts INTEGER NOT NULL);
+             CREATE TABLE devices(account TEXT NOT NULL, id INTEGER NOT NULL, keys TEXT, name TEXT, created INTEGER NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(account, id));
+             INSERT INTO accounts(id, keys, created) VALUES('alice', '{\"reg\":1}', 5);
+             INSERT INTO prekeys VALUES('alice', 7, 'pk'); INSERT INTO kyber_prekeys VALUES('alice', 9, 'kk', 'sig');
+             INSERT INTO messages(recipient, sender, body, ts) VALUES('alice', 'bob', 'hi', 6);",
+        )
+        .unwrap();
+        migrate_devices(&db);
+        migrate_devices(&db); // idempotent
+        assert_eq!(active_devices(&db, "alice"), vec![1]);
+        let keys: String = db.query_row("SELECT keys FROM devices WHERE account='alice' AND id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(keys, "{\"reg\":1}");
+        let pk: (u32, u32) = db.query_row("SELECT device, id FROM prekeys", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(pk, (1, 7));
+        let k: u32 = db.query_row("SELECT device FROM kyber_prekeys", [], |r| r.get(0)).unwrap();
+        assert_eq!(k, 1);
+        let m: (u32, u32) = db.query_row("SELECT device, sender_device FROM messages", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(m, (1, 1));
+
+        // A send must name exactly the recipient's current devices.
+        db.execute("INSERT INTO devices(account, id, keys, created, seen) VALUES('alice', 2, '{}', 0, 0), ('alice', 3, NULL, 0, 0)", []).unwrap();
+        let msgs = |ds: &[u32]| ds.iter().map(|d| DeviceMsg { device: *d, body: String::new() }).collect::<Vec<_>>();
+        assert!(check_devices(&db, "alice", None, &msgs(&[1, 2])).is_ok(), "device 3 hasn't set up keys yet");
+        let err = check_devices(&db, "alice", None, &msgs(&[1, 4])).unwrap_err();
+        assert_eq!((err["missing"].clone(), err["extra"].clone()), (json!([2]), json!([4])));
+        assert!(check_devices(&db, "alice", None, &msgs(&[1, 2, 2])).is_err(), "duplicates");
+        assert!(check_devices(&db, "alice", Some(2), &msgs(&[1])).is_ok(), "writing to yourself skips this device");
+    }
 
     #[test]
     fn dev_mode_accepts_only_local_hosts() {

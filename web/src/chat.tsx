@@ -245,7 +245,7 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
           }}
           className="scroll-thin absolute inset-0 overflow-x-hidden overflow-y-auto"
         >
-          <div role="log" aria-live="polite" aria-label="Messages" className="mx-auto flex min-h-full max-w-3xl flex-col justify-end px-2 py-3 sm:px-6">
+          <div role="log" aria-live="polite" aria-label="Messages" className="flex min-h-full flex-col justify-end px-2 py-3 sm:px-4 lg:px-5">
             {count === 0 && (id === SAVED ? <SavedIntro /> : <Intro title={title} group={!!chat.group} />)}
             {hidden > 0 && (
               <p className="my-2 flex justify-center">
@@ -1073,8 +1073,8 @@ function Composer(props: {
   const who = (m: Msg) => (m.mine ? 'yourself' : chat?.group ? personName(m.from ?? '') : title)
 
   return (
-    <div className="shrink-0 border-t border-line/60 bg-panel px-2 pt-2 pb-[max(0.6rem,env(safe-area-inset-bottom))] sm:px-6">
-      <div className="relative mx-auto max-w-3xl">
+    <div className="shrink-0 border-t border-line/60 bg-panel px-2 pt-2 pb-[max(0.6rem,env(safe-area-inset-bottom))] sm:px-4 lg:px-5">
+      <div className="relative">
         {bar && !rec && (
           <div key={bar.id + (editing ? 'e' : 'r')} className="rise mb-2 flex items-center gap-3 rounded-xl px-2">
             <Icon name={editing ? 'pencil' : 'reply'} className="size-5 shrink-0 text-lamp" />

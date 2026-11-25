@@ -41,5 +41,16 @@
       "minimumSystemVersion": "13.0",
       "signingIdentity": "-"
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYyNzJGQTRFNEUwMEJBQzUKUldURnVnQk9UdnB5WWtnQzNzVEtXSWtINk1aUXdBVTJWSUlNblBCd0pSajEyRTFYd01hZnlzdi8K",
+      "endpoints": [
+        "https://github.com/0xGingi/fog/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

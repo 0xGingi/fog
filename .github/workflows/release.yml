@@ -111,10 +111,14 @@ jobs:
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the auto-update files; installed apps only accept updates signed with this key.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: web
           tauriScript: bunx tauri
-          args: --target ${{ matrix.target }}
+          # Update bundles (.app.tar.gz, signed installers) are built in CI only, where the key is.
+          args: --target ${{ matrix.target }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: Fog ${{ github.ref_name }}
           releaseBody: |
@@ -129,3 +133,6 @@ jobs:
           # to releases/latest/download/<file> and always serve the newest build.
           releaseAssetNamePattern: ${{ matrix.asset }}[setup][ext]
           uploadWorkflowArtifacts: true
+          # latest.json: what installed apps check for updates (macOS .app.tar.gz, Windows setup.exe, Linux AppImage).
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true

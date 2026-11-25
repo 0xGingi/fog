@@ -16,6 +16,8 @@ export type Call = {
   local?: MediaStream
   remote?: MediaStream
   ended?: string
+  /** Which of the peer's devices we're talking to (they may have several; all of yours ring). */
+  dev?: number
 }
 
 let call: Call | null = null
@@ -113,12 +115,13 @@ export async function accept(video = call?.video ?? false) {
   await p.setLocalDescription(await p.createAnswer())
   await gathered(p)
   if (current()?.id !== c.id) return
-  fog.sendSignal(c.peer, { id: c.id, k: 'answer', sdp: p.localDescription!.sdp }).catch(() => finish("Couldn't reach them"))
+  fog.sendSignal(c.peer, { id: c.id, k: 'answer', sdp: p.localDescription!.sdp, to: c.dev }).catch(() => finish("Couldn't reach them"))
+  fog.callHandled(c.id)
 }
 
-const signal = (k: 'end' | 'decline' | 'busy', to = call) => to && fog.sendSignal(to.peer, { id: to.id, k }).catch(() => {})
+const signal = (k: 'end' | 'decline' | 'busy', to = call) => to && fog.sendSignal(to.peer, { id: to.id, k, to: to.dev }).catch(() => {})
 
-export const decline = () => (signal('decline'), finish('Declined', true))
+export const decline = () => (signal('decline'), fog.callHandled(call?.id ?? ''), finish('Declined', true))
 export const hangup = () => (signal('end'), finish(call?.started ? 'Call ended' : 'Cancelled'))
 
 export function toggleMute() {
@@ -161,7 +164,7 @@ export async function toggleScreen() {
 }
 
 /** Tear down, leave a record in the chat, show the end state briefly. */
-function finish(reason: string, declinedByMe = false) {
+function finish(reason: string, declinedByMe = false, record = true) {
   const c = call
   if (!c || c.phase === 'ended') return
   clearTimeout(timer)
@@ -173,21 +176,26 @@ function finish(reason: string, declinedByMe = false) {
   screenTrack = null
   c.local?.getTracks().forEach((t) => t.stop())
   const dur = c.started ? (Date.now() - c.started) / 1000 : undefined
-  fog.addCallRecord(c.peer, { out: c.out, video: c.video, dur, missed: !c.out && !c.started && !declinedByMe, declined: declinedByMe || reason === 'Declined' })
+  if (record) fog.addCallRecord(c.peer, { out: c.out, video: c.video, dur, missed: !c.out && !c.started && !declinedByMe, declined: declinedByMe || reason === 'Declined' })
   set({ ...c, phase: 'ended', ended: reason, local: undefined, remote: undefined })
   setTimeout(() => call?.id === c.id && set(null), 1400)
 }
 
-fog.setCallHandler((from, p) => {
+fog.setCallHandler((from, dev, p) => {
   if (typeof p.id !== 'string' || p.id.length > 64) return
+  // Another of our devices picked this call up (or declined it): stop ringing here.
+  if (p.k === 'elsewhere') {
+    if (from === fog.getState().me?.id && call?.id === p.id && !call.out && call.phase === 'ringing') finish('Answered on another device', false, false)
+    return
+  }
   if (p.k === 'offer') {
     if (typeof p.sdp !== 'string' || p.sdp.length > 30_000) return
     if (fog.isBlocked(from)) return
     // Strangers don't ring: their call shows up as a missed call in a message request.
     if (!fog.isTrusted(from)) return void fog.addCallRecord(from, { out: false, video: !!p.video, missed: true })
-    if (call) return void fog.sendSignal(from, { id: p.id, k: 'busy' }).catch(() => {})
+    if (call) return void fog.sendSignal(from, { id: p.id, k: 'busy', to: dev }).catch(() => {})
     offer = p.sdp
-    set({ id: p.id, peer: from, out: false, video: !!p.video, phase: 'ringing', muted: false, camOff: false })
+    set({ id: p.id, peer: from, out: false, video: !!p.video, phase: 'ringing', muted: false, camOff: false, dev })
     tone('ring')
     const id = p.id
     timer = window.setTimeout(() => call?.id === id && call.phase === 'ringing' && finish('Missed'), 45_000)
@@ -199,10 +207,15 @@ fog.setCallHandler((from, p) => {
     return
   }
   if (!call || call.id !== p.id || call.peer !== from) return
+  // Two of their devices answered at once: keep the first, hang up on the other.
+  if (call.dev !== undefined && dev !== call.dev) {
+    if (p.k === 'answer') fog.sendSignal(from, { id: p.id, k: 'end', to: dev }).catch(() => {})
+    return
+  }
   if (p.k === 'answer' && call.out && call.phase === 'ringing' && typeof p.sdp === 'string' && p.sdp.length <= 30_000) {
     tone(null)
     clearTimeout(timer)
-    patch({ phase: 'connecting' })
+    patch({ phase: 'connecting', dev })
     pc?.setRemoteDescription({ type: 'answer', sdp: p.sdp }).catch(() => finish("Couldn't connect"))
   }
   if (p.k === 'end') finish(call.started ? 'Call ended' : call.out ? 'Call ended' : 'Missed')

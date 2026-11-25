@@ -10,7 +10,8 @@ export default defineConfig(({ mode }) => {
   // Strict CSP for production builds (dev needs inline scripts for HMR). XSS here would mean stolen keys.
   // Native builds talk to a remote server, so it joins connect-src.
   const server = env.VITE_FOG_SERVER ? new URL(env.VITE_FOG_SERVER) : null
-  const connect = server ? `'self' ${server.origin} ${server.protocol === 'https:' ? 'wss' : 'ws'}://${server.host}` : "'self'"
+  // The desktop app also talks to its native side over Tauri's IPC protocol.
+  const connect = server ? `'self' ${server.origin} ${server.protocol === 'https:' ? 'wss' : 'ws'}://${server.host}${desktop ? ' ipc: http://ipc.localhost' : ''}` : "'self'"
   const csp: Plugin = {
     name: 'csp',
     apply: 'build',
