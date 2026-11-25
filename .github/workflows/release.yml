@@ -52,7 +52,6 @@ jobs:
           - { name: Linux x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
           - { name: Linux arm64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
           - { name: Windows x64, os: windows-2025, target: x86_64-pc-windows-msvc }
-          - { name: Windows x86, os: windows-2025, target: i686-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     env:
       HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
@@ -122,7 +121,7 @@ jobs:
             Desktop apps for Fog. Pick the file for your system:
 
             - **macOS (Apple silicon):** `.dmg`
-            - **Windows:** `-setup.exe` (or `.msi`); x64 for most PCs, x86 for 32-bit Windows
+            - **Windows (x64):** `-setup.exe` (or `.msi`)
             - **Linux:** `.AppImage`, `.deb` or `.rpm`, for x64 (amd64/x86_64) or arm64 (aarch64)
           releaseDraft: true
           prerelease: ${{ startsWith(github.ref_name, 'v0.') }}

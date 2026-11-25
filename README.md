@@ -66,7 +66,7 @@ Fog is a self-hostable, end-to-end encrypted messenger built on Signal's Rust `l
 
 The desktop app ([Tauri](https://tauri.app)) wraps the same client in a native window. It loads only files bundled at build time, grants the page no native commands, and talks to `https://getfog.org`.
 
-**Download:** [latest release](https://github.com/0xGingi/fog/releases/latest) for macOS (Apple silicon), Windows (x64, x86) and Linux (x64, arm64; AppImage, deb, rpm).
+**Download:** [latest release](https://github.com/0xGingi/fog/releases/latest) for macOS (Apple silicon), Windows (x64) and Linux (x64, arm64; AppImage, deb, rpm).
 
 **Build it yourself:**
 
