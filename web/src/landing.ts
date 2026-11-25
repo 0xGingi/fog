@@ -76,3 +76,9 @@ indexedDB
     if (dbs.some((d) => d.name === 'fog')) document.querySelectorAll('a[data-open]').forEach((a) => a.textContent === 'Open Fog in your browser' && (a.textContent = 'Open your chats'))
   })
   .catch(() => {})
+
+// Highlight the download for this computer. Phones and tablets get none (no mobile app yet).
+const ua = navigator.userAgent
+const touchMac = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1 // iPadOS reports itself as a Mac
+const os = /Android|iPhone|iPad/.test(ua) || touchMac ? null : /Mac/.test(ua) ? 'mac' : /Win/.test(ua) ? 'windows' : /Linux|X11/.test(ua) ? 'linux' : null
+if (os) document.querySelector(`[data-os="${os}"]`)?.classList.add('os-match')

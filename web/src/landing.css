@@ -145,3 +145,9 @@
     scroll-behavior: auto;
   }
 }
+
+/* The download card for the visitor's own system (set in landing.ts). */
+.os-match {
+  border-color: var(--lamp);
+  box-shadow: 0 0 0 1px var(--lamp);
+}

@@ -85,7 +85,7 @@ On macOS the bundle includes camera/microphone usage descriptions and entitlemen
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-The tag sets the app version. The installers land on a **draft** GitHub release; check it and publish. `v0.x` tags are marked as pre-releases. Running the workflow by hand from the Actions tab builds everything as workflow artifacts without making a release.
+The tag sets the app version, and the release is published with the installers as soon as every platform has built. Installers have version-free names (`Fog-macOS-arm64.dmg`, `Fog-Windows-x64-setup.exe`, `Fog-Linux-x64.AppImage`, …), so the landing page's download buttons (`releases/latest/download/<file>`) always serve the newest release. Running the workflow by hand from the Actions tab builds everything as workflow artifacts without making a release.
 
 The crypto core is compiled to WebAssembly once and shared by every platform build. [`ci.yml`](.github/workflows/ci.yml) runs the Rust tests, the web build and the end-to-end protocol test on every push and pull request.
 

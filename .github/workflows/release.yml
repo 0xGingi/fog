@@ -1,6 +1,6 @@
-# Desktop releases. Push a tag like v0.2.0 and this builds Fog for every platform and attaches the
-# installers to a draft GitHub release (review it, then publish). Running it by hand from the
-# Actions tab builds everything as downloadable workflow artifacts without making a release.
+# Desktop releases. Push a tag like v0.2.0 and this builds Fog for every platform and publishes a
+# GitHub release with the installers. Running it by hand from the Actions tab builds everything as
+# downloadable workflow artifacts without making a release.
 name: Release desktop
 
 on:
@@ -48,10 +48,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: macOS (Apple silicon), os: macos-15, target: aarch64-apple-darwin }
-          - { name: Linux x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { name: Linux arm64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
-          - { name: Windows x64, os: windows-2025, target: x86_64-pc-windows-msvc }
+          - { name: macOS (Apple silicon), os: macos-15, target: aarch64-apple-darwin, asset: Fog-macOS-arm64 }
+          - { name: Linux x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, asset: Fog-Linux-x64 }
+          - { name: Linux arm64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, asset: Fog-Linux-arm64 }
+          - { name: Windows x64, os: windows-2025, target: x86_64-pc-windows-msvc, asset: Fog-Windows-x64 }
     runs-on: ${{ matrix.os }}
     env:
       HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
@@ -120,9 +120,12 @@ jobs:
           releaseBody: |
             Desktop apps for Fog. Pick the file for your system:
 
-            - **macOS (Apple silicon):** `.dmg`
-            - **Windows (x64):** `-setup.exe` (or `.msi`)
+            - **macOS (Apple silicon):** `Fog-macOS-arm64.dmg`
+            - **Windows (x64):** `Fog-Windows-x64-setup.exe` (or `.msi`)
             - **Linux:** `.AppImage`, `.deb` or `.rpm`, for x64 (amd64/x86_64) or arm64 (aarch64)
-          releaseDraft: true
-          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          # Published straight away and not a pre-release, so getfog.org's /releases/latest link finds it.
+          releaseDraft: false
+          # Version-free names (Fog-macOS-arm64.dmg, Fog-Windows-x64-setup.exe, ...) so getfog.org can link
+          # to releases/latest/download/<file> and always serve the newest build.
+          releaseAssetNamePattern: ${{ matrix.asset }}[setup][ext]
           uploadWorkflowArtifacts: true

@@ -27,7 +27,8 @@
       <nav class="flex items-center gap-1 text-[15px] sm:gap-2" aria-label="Site">
         <a href="#security" class="hidden rounded-full px-3 py-2 text-muted hover:text-ink sm:block">Security</a>
         <a href="#server" class="hidden rounded-full px-3 py-2 text-muted hover:text-ink sm:block">What we see</a>
-        <a href="#self-host" class="hidden rounded-full px-3 py-2 text-muted hover:text-ink md:block">Self-host</a>
+        <a href="#download" class="hidden rounded-full px-3 py-2 text-muted hover:text-ink md:block">Download</a>
+        <a href="#self-host" class="hidden rounded-full px-3 py-2 text-muted hover:text-ink lg:block">Self-host</a>
         <a href="https://github.com/0xGingi/fog" rel="noopener" class="hidden rounded-full px-3 py-2 text-muted hover:text-ink sm:block">GitHub</a>
         <a href="/app/" data-open class="ml-2 rounded-full bg-lamp px-4 py-2 font-semibold text-lamp-ink transition hover:brightness-105">Open Fog</a>
       </nav>
@@ -38,7 +39,7 @@
       <section class="relative -mt-[76px] overflow-hidden pt-[76px]">
         <div class="glow absolute inset-0" aria-hidden="true"></div>
         <div class="fogbank-waves" aria-hidden="true"></div>
-        <div class="relative mx-auto grid max-w-6xl items-center gap-12 px-4 pt-10 pb-20 sm:px-6 lg:grid-cols-[1fr_1.05fr] lg:gap-16 lg:pt-16 lg:pb-28">
+        <div class="relative mx-auto grid max-w-6xl items-center gap-12 [&>*]:min-w-0 px-4 pt-10 pb-20 sm:px-6 lg:grid-cols-[1fr_1.05fr] lg:gap-16 lg:pt-16 lg:pb-28">
           <div>
             <h1 class="lift max-w-[17ch] text-[42px] leading-[1.03] font-semibold tracking-[-0.03em] sm:text-6xl lg:text-[64px]">Private messaging without a phone number.</h1>
             <p class="mt-6 max-w-[34rem] text-lg leading-relaxed text-muted sm:text-xl">
@@ -49,13 +50,13 @@
               <span class="text-[15px] text-muted">Free. No email, no phone, no ads.</span>
             </div>
             <p class="mt-5 text-[15px] text-muted">
-              Or get the <a href="https://github.com/0xGingi/fog/releases/latest" rel="noopener" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">desktop app</a> for macOS, Windows and Linux.
+              Or <a href="#download" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">download the desktop app</a> for macOS, Windows and Linux.
             </p>
           </div>
 
           <figure class="relative">
             <div class="overflow-hidden rounded-[28px] border border-line bg-panel shadow-[0_30px_80px_-30px_rgba(16,24,32,0.35)]">
-              <div class="grid sm:grid-cols-2">
+              <div class="grid sm:grid-cols-2 [&>*]:min-w-0">
                 <!-- What you see -->
                 <div class="flex flex-col bg-chat sm:h-[26rem]">
                   <div class="flex items-center gap-3 border-b border-line bg-panel px-4 py-3">
@@ -94,7 +95,7 @@
 
       <!-- Identity -->
       <section class="border-y border-line bg-panel">
-        <div class="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-16 lg:py-28">
+        <div class="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-16 lg:py-28 [&>*]:min-w-0">
           <div>
             <h2 class="max-w-[16ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Your account is a key, not your identity.</h2>
             <p class="mt-6 max-w-[36rem] text-lg leading-relaxed text-muted">
@@ -220,7 +221,7 @@
 
       <!-- Open source -->
       <section id="self-host" class="scroll-mt-6 border-t border-line bg-panel">
-        <div class="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-16 lg:py-28">
+        <div class="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-16 lg:py-28 [&>*]:min-w-0">
           <div>
             <h2 class="max-w-[16ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Don't trust us. Check.</h2>
             <p class="mt-6 max-w-[36rem] text-lg leading-relaxed text-muted">
@@ -235,13 +236,56 @@
             </a>
           </div>
           <div class="space-y-4 self-center">
-            <pre class="overflow-x-auto rounded-2xl bg-code p-5 font-mono text-[13.5px] leading-relaxed text-code-ink"><code><span class="text-white/45"># run your own Fog</span>
-cp .env.example .env      <span class="text-white/45"># your domain + a secret</span>
+            <pre class="overflow-x-auto rounded-2xl bg-code p-4 font-mono text-[12.5px] leading-relaxed whitespace-pre-wrap text-code-ink [overflow-wrap:anywhere] sm:p-5 sm:text-[13.5px] sm:whitespace-pre"><code><span class="text-white/45"># run your own Fog (set your domain and a secret in .env)</span>
+cp .env.example .env
 docker compose up -d --build</code></pre>
-            <pre class="overflow-x-auto rounded-2xl bg-code p-5 font-mono text-[13.5px] leading-relaxed text-code-ink"><code><span class="text-white/45"># check what getfog.org serves</span>
+            <pre class="overflow-x-auto rounded-2xl bg-code p-4 font-mono text-[12.5px] leading-relaxed whitespace-pre-wrap text-code-ink [overflow-wrap:anywhere] sm:p-5 sm:text-[13.5px] sm:whitespace-pre"><code><span class="text-white/45"># check what getfog.org serves</span>
 bun web/verify.ts https://getfog.org ./my-build
 <span class="text-[#f5c562]">All 17 files match.</span></code></pre>
           </div>
+        </div>
+      </section>
+
+      <!-- Download: stable file names, so these always point at the newest release. -->
+      <section id="download" class="scroll-mt-6 border-t border-line">
+        <div class="mx-auto max-w-6xl px-4 py-20 sm:px-6 lg:py-28">
+          <h2 class="max-w-[20ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Fog for your computer.</h2>
+          <p class="mt-5 max-w-[40rem] text-lg leading-relaxed text-muted">
+            The desktop app ships Fog's code once, at install, instead of loading it on every visit. Use it instead of the browser, not alongside it: an account lives on one device at a time.
+          </p>
+          <div class="mt-12 grid gap-6 md:grid-cols-3 [&>*]:min-w-0">
+            <div data-os="mac" class="flex flex-col rounded-3xl border border-line bg-panel p-7">
+              <h3 class="text-xl font-semibold">macOS</h3>
+              <p class="mt-1 text-muted">Apple silicon (M1 and later)</p>
+              <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-macOS-arm64.dmg" class="inline-flex items-center justify-center rounded-full bg-lamp px-5 py-3 font-semibold text-lamp-ink transition hover:brightness-105 mt-6">Download for macOS</a>
+              <p class="mt-auto pt-5 text-sm leading-relaxed text-muted">Signed and notarized by Apple.</p>
+            </div>
+            <div data-os="windows" class="flex flex-col rounded-3xl border border-line bg-panel p-7">
+              <h3 class="text-xl font-semibold">Windows</h3>
+              <p class="mt-1 text-muted">Windows 10 and 11, 64-bit</p>
+              <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Windows-x64-setup.exe" class="inline-flex items-center justify-center rounded-full bg-lamp px-5 py-3 font-semibold text-lamp-ink transition hover:brightness-105 mt-6">Download for Windows</a>
+              <div class="mt-3 flex flex-wrap gap-2"><a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Windows-x64.msi" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">.msi installer</a></div>
+              <p class="mt-auto pt-5 text-sm leading-relaxed text-muted">Not code-signed yet, so Windows may ask you to confirm on first run.</p>
+            </div>
+            <div data-os="linux" class="flex flex-col rounded-3xl border border-line bg-panel p-7">
+              <h3 class="text-xl font-semibold">Linux</h3>
+              <p class="mt-1 text-muted">x64 and arm64</p>
+              <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-x64.AppImage" class="inline-flex items-center justify-center rounded-full bg-lamp px-5 py-3 font-semibold text-lamp-ink transition hover:brightness-105 mt-6">AppImage for x64</a>
+              <div class="mt-3 flex flex-wrap gap-2">
+                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-x64.deb" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">.deb</a>
+                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-x64.rpm" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">.rpm</a>
+              </div>
+              <p class="mt-5 text-sm font-medium">arm64</p>
+              <div class="mt-2 flex flex-wrap gap-2">
+                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-arm64.AppImage" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">AppImage</a>
+                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-arm64.deb" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">.deb</a>
+                <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Linux-arm64.rpm" class="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium transition hover:border-muted">.rpm</a>
+              </div>
+            </div>
+          </div>
+          <p class="mt-8 text-[15px] text-muted">
+            Release notes and every past version are on <a href="https://github.com/0xGingi/fog/releases" rel="noopener" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">GitHub</a>.
+          </p>
         </div>
       </section>
 
