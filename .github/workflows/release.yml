@@ -260,6 +260,9 @@ jobs:
         with:
           toolchain: stable
           targets: aarch64-apple-ios
+          # swift-rs needs llvm-objcopy with Xcode 27, or the Swift plugins' entry points (@_cdecl)
+          # stay internal and the link fails with "Undefined symbols: _init_plugin_fog".
+          components: llvm-tools
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: env.HAS_IOS == 'true'
         with:
