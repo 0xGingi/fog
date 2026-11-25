@@ -1,0 +1,129 @@
+# Desktop releases. Push a tag like v0.2.0 and this builds Fog for every platform and attaches the
+# installers to a draft GitHub release (review it, then publish). Running it by hand from the
+# Actions tab builds everything as downloadable workflow artifacts without making a release.
+name: Release desktop
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The crypto core is compiled to WebAssembly once and shared, so every platform ships the same bytes.
+  core:
+    name: Crypto core (wasm)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.100.0 # same as the Dockerfile
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: wasm-bindgen@0.2.130 # must match the wasm-bindgen crate version in core/Cargo.toml
+      - run: cargo build --release -p fog-core --target wasm32-unknown-unknown
+      - run: wasm-bindgen --target web --out-dir web/src/core target/wasm32-unknown-unknown/release/fog_core.wasm
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fog-core
+          path: web/src/core
+          if-no-files-found: error
+
+  desktop:
+    name: ${{ matrix.name }}
+    needs: core
+    permissions:
+      contents: write # create the draft release and upload installers
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS (Apple silicon), os: macos-15, target: aarch64-apple-darwin }
+          - { name: Linux x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { name: Linux arm64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { name: Windows x64, os: windows-2025, target: x86_64-pc-windows-msvc }
+          - { name: Windows x86, os: windows-2025, target: i686-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    env:
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fog-core
+          path: web/src/core
+
+      # Ubuntu 22.04 keeps the Linux builds compatible with older glibc versions.
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential file libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: web/src-tauri -> target
+          key: ${{ matrix.target }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+        working-directory: web
+
+      # The tag is the version: v0.2.0 builds Fog 0.2.0.
+      - name: Version from tag
+        if: github.ref_type == 'tag'
+        working-directory: web
+        run: V="${GITHUB_REF_NAME#v}" bun -e 'const f = "src-tauri/tauri.conf.json"; const c = await Bun.file(f).json(); c.version = process.env.V; await Bun.write(f, JSON.stringify(c, null, 2) + "\n")'
+
+      # Signing and notarization switch on when the Apple secrets exist (see README). Without them
+      # the app is ad-hoc signed, which runs but makes Gatekeeper warn on first open.
+      - name: Apple signing
+        if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for k in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!k}" ] && echo "$k=${!k}" >> "$GITHUB_ENV"
+          done
+
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: web
+          tauriScript: bunx tauri
+          args: --target ${{ matrix.target }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: Fog ${{ github.ref_name }}
+          releaseBody: |
+            Desktop apps for Fog. Pick the file for your system:
+
+            - **macOS (Apple silicon):** `.dmg`
+            - **Windows:** `-setup.exe` (or `.msi`); x64 for most PCs, x86 for 32-bit Windows
+            - **Linux:** `.AppImage`, `.deb` or `.rpm`, for x64 (amd64/x86_64) or arm64 (aarch64)
+          releaseDraft: true
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          uploadWorkflowArtifacts: true

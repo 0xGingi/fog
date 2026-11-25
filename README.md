@@ -64,14 +64,41 @@ Fog is a self-hostable, end-to-end encrypted messenger built on Signal's Rust `l
 
 ## Desktop App
 
-The desktop app ([Tauri](https://tauri.app)) wraps the same client in a native window. It loads only files bundled at build time, grants the page no native commands, and talks to `https://getfog.org` (override with `FOG_SERVER`):
+The desktop app ([Tauri](https://tauri.app)) wraps the same client in a native window. It loads only files bundled at build time, grants the page no native commands, and talks to `https://getfog.org`.
+
+**Download:** [latest release](https://github.com/0xGingi/fog/releases/latest) for macOS (Apple silicon), Windows (x64, x86) and Linux (x64, arm64; AppImage, deb, rpm).
+
+**Build it yourself:**
 
 ```sh
 cd web && bun install && bun run core
-bun run desktop                  # or: FOG_SERVER=https://example.com bun run desktop
+bun run desktop                  # point it elsewhere: VITE_FOG_SERVER=https://example.com bun run desktop
 ```
 
 On macOS the bundle includes camera/microphone usage descriptions and entitlements for calls. Passkey unlock isn't available inside the desktop webview yet; passcode lock works.
+
+### Releasing
+
+[`release.yml`](.github/workflows/release.yml) builds every platform when you push a version tag:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The tag sets the app version. The installers land on a **draft** GitHub release; check it and publish. `v0.x` tags are marked as pre-releases. Running the workflow by hand from the Actions tab builds everything as workflow artifacts without making a release.
+
+The crypto core is compiled to WebAssembly once and shared by every platform build. [`ci.yml`](.github/workflows/ci.yml) runs the Rust tests, the web build and the end-to-end protocol test on every push and pull request.
+
+**macOS signing.** Without Apple credentials the app is ad-hoc signed: it runs, but macOS says it can't verify the developer on first open (right-click → Open, or `xattr -dr com.apple.quarantine /Applications/Fog.app`). To sign and notarize, add these repository secrets and the workflow uses them automatically:
+
+| Secret | What it is |
+| --- | --- |
+| `APPLE_CERTIFICATE` | Developer ID Application certificate, exported as `.p12` and base64-encoded |
+| `APPLE_CERTIFICATE_PASSWORD` | Password for that `.p12` |
+| `APPLE_SIGNING_IDENTITY` | e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | Apple ID, an app-specific password, and your team ID, for notarization |
+
+Windows builds are unsigned for now, so SmartScreen warns on first run until a code-signing certificate is added.
 
 ## Architecture
 

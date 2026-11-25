@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "build:desktop": "tsc --noEmit && VITE_FOG_SERVER=${FOG_SERVER:-https://getfog.org} vite build --outDir dist-desktop",
+    "build:desktop": "tsc --noEmit && vite build --mode desktop",
     "desktop": "tauri build"
   },
   "dependencies": {

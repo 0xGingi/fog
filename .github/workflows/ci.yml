@@ -1,0 +1,50 @@
+# Every push and pull request: Rust tests, the web build, and the end-to-end protocol test
+# against a freshly built server.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.100.0
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: wasm-bindgen@0.2.130
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.5
+
+      - name: Rust tests (crypto core, server)
+        run: cargo test --release -p fog-core -p fog-server
+      - name: Build crypto core (wasm)
+        run: |
+          cargo build --release -p fog-core --target wasm32-unknown-unknown
+          wasm-bindgen --target web --out-dir web/src/core target/wasm32-unknown-unknown/release/fog_core.wasm
+      - name: Build web app
+        working-directory: web
+        run: bun install --frozen-lockfile && bun run build
+
+      - name: End-to-end protocol test
+        run: |
+          cargo build --release -p fog-server
+          FOG_DB="$RUNNER_TEMP/fog.db" FOG_BLOBS="$RUNNER_TEMP/blobs" FOG_STUN=off ./target/release/fog-server &
+          for _ in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/8787) 2>/dev/null && break; sleep 1; done
+          cd web && bun e2e.ts
