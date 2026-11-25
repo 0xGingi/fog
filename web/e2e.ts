@@ -128,6 +128,18 @@ assert(back.length === blob.length && back.every((b, i) => b === blob[i]), 'down
 const { id: small } = await A.rpc({ t: 'upload', size: 10 })
 assert((await fetch(`http://${HOST}/blob/${small}`, { method: 'PUT', body: blob })).status === 413, 'oversized upload refused')
 
+// Chat backup: only an upload reserved as a backup can become one, and only by its own account.
+assert((await A.rpc({ t: 'backup', id: blobId })).error === 'no such upload', "an attachment can't become a backup")
+const backupBytes = crypto.getRandomValues(new Uint8Array(5000))
+const { id: bk } = await A.rpc({ t: 'upload', size: backupBytes.length, backup: true })
+assert((await fetch(`http://${HOST}/blob/${bk}`, { method: 'PUT', body: backupBytes })).status === 201, 'backup uploaded')
+assert((await B2.rpc({ t: 'backup', id: bk })).error, "someone else's upload can't become your backup")
+assert(!(await A.rpc({ t: 'backup', id: bk })).error, 'backup recorded')
+assert((await A.rpc({ t: 'backup' })).id === bk, 'backup found again (restore)')
+assert((await B2.rpc({ t: 'backup' })).id === null, 'no backup for an account that made none')
+assert(!(await A.rpc({ t: 'backup', id: '' })).error && (await A.rpc({ t: 'backup' })).id === null, 'backup deleted when turned off')
+assert((await fetch(`http://${HOST}/blob/${bk}`)).status === 404, 'its file is gone too')
+
 // Sealed sender: Bob registers an access key; Alice sends with it and no sender attached.
 const access = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString('base64')
 assert(!(await B2.rpc({ t: 'access', key: access })).error, 'register access key')

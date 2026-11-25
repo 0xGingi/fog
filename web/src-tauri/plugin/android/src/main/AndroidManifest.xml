@@ -3,6 +3,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Installing a downloaded update (Android asks you to allow it the first time). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Incoming calls: a ringing screen over the lock screen. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <application>
         <meta-data android:name="com.google.firebase.messaging.default_notification_icon" android:resource="@drawable/ic_fog_notification" />
         <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="messages" />
@@ -11,6 +14,7 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
+        <receiver android:name="org.getfog.plugin.DeclineCall" android:exported="false" />
         <!-- No Firebase delivery metrics. -->
         <meta-data android:name="delivery_metrics_exported_to_big_query_enabled" android:value="false" />
     </application>

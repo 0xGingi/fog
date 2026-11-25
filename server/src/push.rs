@@ -12,6 +12,8 @@ use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, RSA_PKCS1_S
 use serde_json::{Value, json};
 
 const TEXT: &str = "New message";
+/// Calls: the generic text, a ringtone (made by the app at fog-ring.wav), and they get through Focus.
+const CALL_TEXT: &str = "Incoming call";
 
 pub struct Pusher {
     http: reqwest::Client,
@@ -92,10 +94,10 @@ impl Pusher {
 
     /// Wake one device. Failures other than a dead token are logged and dropped: the message is
     /// still queued, so the phone gets it the next time Fog opens.
-    pub async fn wake(&self, kind: &str, token: &str) -> Result<(), Gone> {
+    pub async fn wake(&self, kind: &str, token: &str, call: bool) -> Result<(), Gone> {
         let sent = match kind {
-            "apns" | "apns-dev" => self.apns(kind == "apns-dev", token).await,
-            "fcm" => self.fcm(token).await,
+            "apns" | "apns-dev" => self.apns(kind == "apns-dev", token, call).await,
+            "fcm" => self.fcm(token, call).await,
             _ => return Err(Gone),
         };
         match sent {
@@ -111,7 +113,7 @@ impl Pusher {
         }
     }
 
-    async fn apns(&self, sandbox: bool, token: &str) -> Option<(u16, String)> {
+    async fn apns(&self, sandbox: bool, token: &str, call: bool) -> Option<(u16, String)> {
         let Some(a) = &self.apns else { return None };
         let bearer = {
             let mut cached = a.jwt.lock().unwrap();
@@ -132,9 +134,16 @@ impl Pusher {
             .header("apns-push-type", "alert")
             .header("apns-priority", "10")
             // Later pushes replace the earlier one instead of stacking up.
-            .header("apns-collapse-id", "fog")
+            .header("apns-collapse-id", if call { "fog-call" } else { "fog" })
             .header("content-type", "application/json")
-            .body(json!({"aps": {"alert": {"body": TEXT}, "sound": "default"}}).to_string())
+            .body(
+                if call {
+                    json!({"aps": {"alert": {"title": "Fog", "body": CALL_TEXT}, "sound": "fog-ring.wav", "interruption-level": "time-sensitive"}})
+                } else {
+                    json!({"aps": {"alert": {"body": TEXT}, "sound": "default"}})
+                }
+                .to_string(),
+            )
             .send()
             .await
             .inspect_err(|e| eprintln!("push (apns): {e}"))
@@ -142,14 +151,20 @@ impl Pusher {
         Some((r.status().as_u16(), r.text().await.unwrap_or_default()))
     }
 
-    async fn fcm(&self, token: &str) -> Option<(u16, String)> {
+    async fn fcm(&self, token: &str, call: bool) -> Option<(u16, String)> {
         let Some(f) = &self.fcm else { return None };
         let access = self.fcm_access(f).await?;
-        let msg = json!({"message": {
-            "token": token,
-            "notification": {"body": TEXT},
-            "android": {"priority": "high", "collapse_key": "fog", "notification": {"tag": "fog"}},
-        }});
+        // A call is a data-only push: the app shows its own full-screen ringing screen. A message
+        // is a notification Android shows by itself.
+        let msg = if call {
+            json!({"message": {"token": token, "data": {"type": "call"}, "android": {"priority": "high", "ttl": "45s"}}})
+        } else {
+            json!({"message": {
+                "token": token,
+                "notification": {"body": TEXT},
+                "android": {"priority": "high", "collapse_key": "fog", "notification": {"tag": "fog"}},
+            }})
+        };
         let r = self
             .http
             .post(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", f.project))

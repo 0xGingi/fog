@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import * as fog from './fog'
 import { attLabel, chatTitle, msgStatus, personName, timerLabel, useFog, type Chat, type LinkPreview, type Msg } from './fog'
 import { fmtDur as dur } from './media'
-import { cycleRate, download, fmtDur, fmtSize, localBlob, saveFile, seek, togglePlay, useLocalUrl, usePlayer, useTransfer, type Att } from './media'
+import { cycleRate, download, fmtDur, fmtSize, localBlob, posterNow, saveFile, seek, thumbIsBlank, togglePlay, useLocalUrl, usePlayer, useTransfer, type Att } from './media'
 import { Avatar, copy, Icon, usePressMenu, Zoomable, type MenuAt } from './ui'
 
 // ---------- formatting ----------
@@ -38,6 +38,7 @@ export function sysText(m: Msg) {
 
 function callText(c: NonNullable<Msg['sys']>['call'] & {}) {
   const kind = c.video ? 'video call' : 'voice call'
+  if (c.group) return c.dur ? `Group ${kind} · ${dur(c.dur)}` : c.out ? `Group ${kind}, nobody joined` : `Missed group ${kind}`
   if (c.dur) return `${c.out ? 'Outgoing' : 'Incoming'} ${kind} · ${dur(c.dur)}`
   if (c.missed) return `Missed ${kind}`
   if (c.declined) return `Declined ${kind}`
@@ -740,7 +741,7 @@ export function MediaViewer({ chat, start, onClose }: { chat: Chat; start: strin
             <span className="relative">{t && !t.err ? <Ring p={t.p} className="size-16" /> : t?.err ? 'Download failed' : null}</span>
           </div>
         ) : a.kind === 'video' ? (
-          <VideoPlayer key={url} src={url} chrome={chrome} setChrome={setChrome} caption={m.text} poke={poke} />
+          <VideoPlayer key={url} src={url} chrome={chrome} setChrome={setChrome} caption={m.text} poke={poke} onFrame={(v) => fixThumb(v, chat.id, m.id, a.thumb)} />
         ) : (
           <img key={url} src={url} alt="Photo" draggable={false} className="pop size-full object-contain" />
         )}
@@ -776,7 +777,18 @@ export function MediaViewer({ chat, start, onClose }: { chat: Chat; start: strin
  * on phones only appear in fullscreen): play/pause, a scrubber, time, sound, speed and fullscreen.
  * While it plays, the controls fade out after a moment; a tap brings them back.
  */
-function VideoPlayer({ src, chrome, setChrome, caption, poke }: { src: string; chrome: boolean; setChrome: (v: boolean) => void; caption?: string; poke: number }) {
+/** Once a video plays, replace a missing or black thumbnail with a real frame (once per video). */
+const fixing = new Set<string>()
+async function fixThumb(v: HTMLVideoElement, chat: string, id: string, thumb?: string) {
+  if (fixing.has(id)) return
+  fixing.add(id)
+  if (!(await thumbIsBlank(thumb))) return
+  const still = await posterNow(v)
+  if (still) fog.setVideoThumb(chat, id, still)
+  else fixing.delete(id) // try again on a later frame
+}
+
+function VideoPlayer({ src, chrome, setChrome, caption, poke, onFrame }: { src: string; chrome: boolean; setChrome: (v: boolean) => void; caption?: string; poke: number; onFrame?: (v: HTMLVideoElement) => void }) {
   const v = useRef<HTMLVideoElement>(null)
   const [playing, setPlaying] = useState(false)
   const [time, setTime] = useState(0)
@@ -819,7 +831,7 @@ function VideoPlayer({ src, chrome, setChrome, caption, poke }: { src: string; c
         className="pop size-full object-contain"
         onPlay={() => setPlaying(true)}
         onPause={() => (setPlaying(false), setChrome(true))}
-        onTimeUpdate={(e) => !seeking && setTime(e.currentTarget.currentTime)}
+        onTimeUpdate={(e) => (!seeking && setTime(e.currentTarget.currentTime), e.currentTarget.currentTime > 0.4 && onFrame?.(e.currentTarget))}
         onLoadedMetadata={(e) => setLen(e.currentTarget.duration || 0)}
         onDurationChange={(e) => setLen(e.currentTarget.duration || 0)}
         onWaiting={() => setWaiting(true)}

@@ -1,7 +1,7 @@
 // Full-screen call UI: incoming ring, outgoing ringback, in-call controls.
 import { useEffect, useRef, useState } from 'react'
-import { accept, decline, hangup, toggleCam, toggleMute, toggleScreen, useCall } from './call'
-import { chatTitle, useFog } from './fog'
+import { accept, decline, hangup, toggleCam, toggleMute, toggleScreen, useCall, type Call } from './call'
+import { chatAvatar, chatTitle, personName, useFog } from './fog'
 import { fmtDur } from './media'
 import { Avatar, Icon, Zoomable } from './ui'
 
@@ -53,13 +53,15 @@ export function CallScreen() {
     setPoke((n) => n + 1)
   }
   const remoteVideo = !!(c?.video && c.remote?.getVideoTracks().length && c.phase === 'active')
+  const autoHide = remoteVideo || !!(c?.group && c.joined && c.started && c.video)
   useEffect(() => {
-    if (!remoteVideo || !chrome) return
+    if (!autoHide || !chrome) return
     const t = setTimeout(() => setChrome(false), 4000)
     return () => clearTimeout(t)
-  }, [remoteVideo, chrome, poke])
+  }, [autoHide, chrome, poke])
   useEffect(() => setChrome(true), [c?.peerSharing, remoteVideo])
   if (!c) return null
+  if (c.group) return <GroupCall c={c} chrome={chrome} setChrome={setChrome} nudge={nudge} />
   const title = chat ? chatTitle(chat, person) : (person?.name ?? 'Unknown')
   const avatar = person?.avatar
   const hidden = remoteVideo && !chrome
@@ -136,6 +138,96 @@ export function CallScreen() {
               <Round label={c.sharing ? 'Stop sharing' : 'Share screen'} on={c.sharing} onClick={toggleScreen} icon={<Icon name="screen" className="size-7" />} />
             )}
             <Round label="End" tone="red" big onClick={hangup} icon={<span className="rotate-[135deg]">{phone}</span>} />
+          </>
+        )}
+      </div>
+      <style>{`@keyframes ringpulse{0%{box-shadow:0 0 0 0 rgba(243,184,74,.45)}100%{box-shadow:0 0 0 36px rgba(243,184,74,0)}}`}</style>
+    </div>
+  )
+}
+
+/** One person in a group call: their video, or their avatar while the camera's off. */
+function Tile({ stream, name, id, avatar, mirror, muted, fit, label }: { stream?: MediaStream; name: string; id: string; avatar?: string; mirror?: boolean; muted?: boolean; fit?: boolean; label?: string }) {
+  const hasVideo = !!stream?.getVideoTracks().some((t) => t.enabled && t.readyState === 'live')
+  return (
+    <div className="relative grid min-h-0 place-items-center overflow-hidden rounded-2xl bg-white/[0.06]">
+      {stream && <Media stream={stream} muted={muted} mirror={mirror} className={`absolute inset-0 size-full ${hasVideo ? '' : 'opacity-0'} ${fit ? 'object-contain' : 'object-cover'}`} />}
+      {!hasVideo && <Avatar id={id} name={name} src={avatar} size={72} />}
+      <span className="absolute bottom-2 left-2 max-w-[80%] truncate rounded-full bg-black/45 px-2 py-0.5 text-xs backdrop-blur-md">{label ?? name}</span>
+    </div>
+  )
+}
+
+/**
+ * Group call: a grid of everyone (up to 8), or, when someone shares their screen, that screen big
+ * (fitted and zoomable) with the others in a strip. Controls fade over video like 1:1 calls.
+ */
+function GroupCall({ c, chrome, setChrome, nudge }: { c: Call; chrome: boolean; setChrome: (f: (x: boolean) => boolean) => void; nudge: (e: React.PointerEvent) => void }) {
+  const chat = useFog((s) => s.chats[c.group!])
+  const people = useFog((s) => s.people)
+  const me = useFog((s) => s.me)
+  const profile = useFog((s) => s.profile)
+  const title = chat ? chatTitle(chat) : 'Group'
+  const peers = Object.entries(c.peers ?? {})
+  const sharer = peers.find(([, p]) => p.sharing && p.stream)
+  const joined = c.joined && c.phase !== 'ended'
+  const hidden = joined && c.video && !!c.started && !chrome
+  const fade = `transition-opacity duration-300 ${hidden ? 'pointer-events-none opacity-0' : 'opacity-100'}`
+  const status =
+    c.phase === 'ended' ? c.ended : c.started ? `${fmtDur((Date.now() - c.started) / 1000)} · ${peers.length + 1} in the call` : c.joined ? (c.out ? 'Ringing the group…' : 'Joining…') : `Group ${c.video ? 'video' : 'voice'} call${c.from ? ` from ${personName(c.from, people[c.from])}` : ''}`
+  const mine = <Tile key="me" stream={c.sharing && c.screen ? c.screen : c.local} muted mirror={!c.sharing} fit={c.sharing} id={me?.id ?? ''} name="You" avatar={profile.avatar} label={c.muted ? 'You (muted)' : 'You'} />
+  const tiles = peers.map(([key, p]) => <Tile key={key} stream={p.stream} id={p.who} name={personName(p.who, people[p.who])} avatar={people[p.who]?.avatar} label={p.connected ? undefined : `${personName(p.who, people[p.who])} · connecting…`} />)
+  const n = tiles.length + 1
+  const cols = n <= 1 ? 'grid-cols-1' : n <= 4 ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-3'
+  return (
+    <div className="fade-in fixed inset-0 z-[60] flex flex-col overflow-hidden bg-[#0b1016] text-white" role="dialog" aria-label={`Group call in ${title}`} onPointerMove={nudge}>
+      <header className={`relative z-10 flex flex-col items-center px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-3 text-center ${fade}`}>
+        {!joined && (
+          <div className={`mt-10 mb-6 rounded-full ${c.phase === 'ringing' ? 'animate-[ringpulse_1.8s_ease-out_infinite]' : ''}`}>
+            <Avatar id={c.group!} name={title} src={chat ? chatAvatar(chat) : undefined} size={128} />
+          </div>
+        )}
+        <h2 className="text-xl font-semibold">{title}</h2>
+        <p className="mt-0.5 text-sm text-white/80 tabular-nums">{status}</p>
+        <p className="mt-2 flex items-center gap-1.5 text-xs text-white/60">
+          <Icon name="lock" className="size-3.5" /> End-to-end encrypted · relayed, so nobody sees your IP
+        </p>
+      </header>
+
+      {joined && (
+        <div className="relative min-h-0 flex-1 px-2 pb-2">
+          {sharer ? (
+            <div className="flex size-full flex-col gap-2">
+              <Zoomable className="min-h-0 flex-1 rounded-2xl bg-black" reset={sharer[0]} onTap={() => setChrome((x) => !x)}>
+                <Media stream={sharer[1].stream} className="size-full object-contain" />
+              </Zoomable>
+              <div className={`grid h-28 shrink-0 auto-cols-[9rem] grid-flow-col gap-2 overflow-x-auto ${fade}`}>
+                {mine}
+                {tiles.filter((t) => t.key !== sharer[0])}
+              </div>
+            </div>
+          ) : (
+            <div className={`grid size-full auto-rows-fr gap-2 ${cols}`} onClick={() => setChrome((x) => !x)}>
+              {mine}
+              {tiles}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className={`relative z-10 flex items-end justify-center gap-6 pt-3 pb-[max(2rem,var(--safe-bottom))] sm:gap-8 ${joined ? fade : 'mt-auto'}`}>
+        {c.phase === 'ended' ? null : !joined ? (
+          <>
+            <Round label="Decline" tone="red" big onClick={decline} icon={<span className="rotate-[135deg]">{phone}</span>} />
+            {c.video && <Round label="Voice only" onClick={() => accept(false)} icon={<Icon name="mic" className="size-7" />} />}
+            <Round label="Join" tone="green" big onClick={() => accept()} icon={c.video ? <Icon name="camera" className="size-7" /> : phone} />
+          </>
+        ) : (
+          <>
+            <Round label={c.muted ? 'Unmute' : 'Mute'} on={c.muted} onClick={toggleMute} icon={<Icon name="mic" className="size-7" />} />
+            {c.video && <Round label={c.camOff ? 'Camera on' : 'Camera off'} on={c.camOff} onClick={toggleCam} icon={<Icon name="camera" className="size-7" />} />}
+            {c.video && 'getDisplayMedia' in (navigator.mediaDevices ?? {}) && <Round label={c.sharing ? 'Stop sharing' : 'Share screen'} on={c.sharing} onClick={toggleScreen} icon={<Icon name="screen" className="size-7" />} />}
+            <Round label="Leave" tone="red" big onClick={hangup} icon={<span className="rotate-[135deg]">{phone}</span>} />
           </>
         )}
       </div>

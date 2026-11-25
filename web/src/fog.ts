@@ -8,7 +8,7 @@ import { chime, dropLocal, MAX_FILE, SERVER, prepare, prepareSticker, upload, do
 export { new_mnemonic as newPhrase, valid_mnemonic as validPhrase }
 
 export type Status = 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
-export type CallRecord = { out: boolean; video: boolean; dur?: number; missed?: boolean; declined?: boolean }
+export type CallRecord = { out: boolean; video: boolean; dur?: number; missed?: boolean; declined?: boolean; group?: boolean }
 export type Sys = { k: 'create' | 'add' | 'remove' | 'leave' | 'rename' | 'decrypt' | 'timer' | 'pin' | 'call' | 'fork'; by: string; who?: string[]; name?: string; secs?: number; call?: CallRecord }
 export type Poll = { q: string; o: string[]; multi?: boolean }
 export type LinkPreview = { url: string; title?: string; desc?: string; site?: string; img?: string }
@@ -79,7 +79,7 @@ export type Chat = {
 }
 export type Person = { username?: string | null; name?: string; avatar?: string; sent?: number; /** Their sealed-sender access key. */ ak?: string; /** Safety number confirmed in person. */ verified?: boolean }
 export type Profile = { name: string; avatar?: string; v: number }
-export type Settings = { readReceipts: boolean; typing: boolean; sounds: boolean; theme: 'system' | 'light' | 'dark'; textSize: number; linkPreviews: boolean; relayCalls: boolean; autoLock: number; lockPrompted?: boolean; /** Desktop app: native notifications. */ notifications?: boolean; /** Show the sender and text in notifications (off: just "New message"). */ previews?: boolean; /** Desktop layout: chat list width, or folded to an avatar rail. */ sidebar?: number; sidebarCollapsed?: boolean }
+export type Settings = { readReceipts: boolean; typing: boolean; sounds: boolean; theme: 'system' | 'light' | 'dark'; textSize: number; linkPreviews: boolean; relayCalls: boolean; autoLock: number; lockPrompted?: boolean; /** Encrypted chat backup to the server (main device; on unless turned off). */ backup?: boolean; /** Desktop app: native notifications. */ notifications?: boolean; /** Show the sender and text in notifications (off: just "New message"). */ previews?: boolean; /** Desktop layout: chat list width, or folded to an avatar rail. */ sidebar?: number; sidebarCollapsed?: boolean }
 export type State = {
   phase: 'loading' | 'locked' | 'unlock' | 'welcome' | 'username' | 'app'
   /** `device` is this device's id; `main` means it holds the recovery phrase (device 1). */
@@ -94,9 +94,13 @@ export type State = {
   toast: { text: string; at: number } | null
   /** Personal sticker library (already uploaded, so sending never re-uploads). */
   stickers: Att[]
+  /** Saved GIFs, the same way: our own collection, no GIF service involved. */
+  gifs: Att[]
   blocked: string[]
   /** Our devices, from the server. */
   devices: DeviceInfo[]
+  /** Chat backup (main device): when the last one was made, and whether one is being made now. */
+  backup: { at: number | null; busy: boolean }
 }
 export type DeviceInfo = { id: number; name: string | null; created: number; seen: number; ready: boolean }
 
@@ -107,8 +111,10 @@ type Payload = (
   | { t: 'text'; id: string; text: string; ts: number; reply?: string; att?: WireAtt; fwd?: boolean; ttl?: number; men?: string[]; poll?: Poll; link?: LinkPreview }
   | { t: 'vote'; id: string; c: number[] }
   /** `to`: only that device of the recipient acts on it. 'elsewhere': answered or declined on another of our devices. */
-  /** 'screen': the sender started (`on`) or stopped sharing their screen, so the other side shows it whole. */
-  | { t: 'call'; id: string; k: 'offer' | 'answer' | 'end' | 'decline' | 'busy' | 'elsewhere' | 'screen'; sdp?: string; video?: boolean; to?: number; on?: boolean }
+  /** 'screen': the sender started (`on`) or stopped sharing their screen, so the other side shows it whole.
+   *  Group calls: 'ring', 'hello' (joined) and 'leave' go to the whole group; offers and answers go
+   *  device to device with `gc`, the group the call is in. */
+  | { t: 'call'; id: string; k: 'offer' | 'answer' | 'end' | 'decline' | 'busy' | 'elsewhere' | 'screen' | 'ring' | 'hello' | 'leave'; sdp?: string; video?: boolean; to?: number; on?: boolean; gc?: string }
   | { t: 'receipt'; ids: string[]; s: 'delivered' | 'read' }
   | { t: 'typing' }
   | { t: 'reset' }
@@ -131,6 +137,18 @@ type Payload = (
   | { t: 'chatmeta'; chat: string; pinned?: boolean; muted?: number; archived?: boolean; accepted?: boolean; deleted?: boolean }
 ) & { g?: string; /** Sender's view of the group: version + fingerprint. */ gv?: number; gh?: string }
 
+// ---------- search (on this device only; nothing is sent anywhere) ----------
+/** Lowercase, accents off: "Café" and "cafe" match. */
+export const fold = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+/** The words to look for. Every one must appear, in any order. */
+export const searchTerms = (q: string) => fold(q).split(/\s+/).filter(Boolean)
+/** Does a message match? Looks at its text, file name, link title and poll. */
+export function msgMatches(m: Msg, terms: string[]) {
+  if (m.sys || !terms.length) return false
+  const hay = fold([m.text, m.att?.name, m.link?.title, m.link?.site, m.poll?.q, ...(m.poll?.o ?? [])].filter(Boolean).join(' '))
+  return terms.every((t) => hay.includes(t))
+}
+
 export const MAX_GROUP = 50 // ponytail: groups encrypt per member (pairwise). Signal sender keys for big groups.
 
 // ---------- store ----------
@@ -142,12 +160,15 @@ let state: State = {
   chats: {},
   people: {},
   active: null,
-  settings: { readReceipts: true, typing: true, sounds: true, theme: 'system', textSize: 16, linkPreviews: false, relayCalls: false, autoLock: 5 },
+  // Calls go through our relay by default, so the people you call never see your IP address.
+  settings: { readReceipts: true, typing: true, sounds: true, theme: 'system', textSize: 16, linkPreviews: false, relayCalls: true, autoLock: 5 },
   jump: null,
   toast: null,
   stickers: [],
+  gifs: [],
   blocked: [],
   devices: [],
+  backup: { at: null, busy: false },
 }
 const listeners = new Set<() => void>()
 function set(patch: Partial<State>) {
@@ -179,6 +200,11 @@ export const jumpTo = (id: string) => set({ jump: { id, at: Date.now() } })
 export const isGroup = (id: string) => id.startsWith('g:')
 /** Notes to self: a local-only chat that never touches the network. */
 export const SAVED = 'saved'
+/** The Fog guide: a scripted chat that lives only on this device (see guide.ts). */
+export const GUIDE = 'guide'
+/** Chats that exist only on this device: nothing in them is ever sent. */
+export const isLocalChat = (id: string) => id === SAVED || id === GUIDE
+const GUIDE_AVATAR = `data:image/svg+xml;base64,${btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f3bd52"/><stop offset="1" stop-color="#df9418"/></linearGradient></defs><rect width="512" height="512" fill="url(#g)"/><g fill="none" stroke="#2a1d04" stroke-linecap="round" stroke-width="34"><path d="M132 200c40-22 82-22 124 0s84 22 124 0"/><path d="M100 270c50-26 104-26 156 0s106 26 156 0"/><path d="M148 340c36-18 72-18 108 0s72 18 108 0"/></g></svg>')}`
 export const isMuted = (c: Chat) => (c.muted ?? 0) > Date.now()
 export const TIMERS = [0, 30, 300, 3600, 86400, 604800]
 export const timerLabel = (s = 0) => (!s ? 'Off' : s < 60 ? `${s} seconds` : s < 3600 ? `${s / 60} minutes` : s < 86400 ? `${s / 3600} hour${s === 3600 ? '' : 's'}` : s < 604800 ? `${s / 86400} day${s === 86400 ? '' : 's'}` : '1 week')
@@ -186,9 +212,9 @@ export const timerLabel = (s = 0) => (!s ? 'Off' : s < 60 ? `${s} seconds` : s <
 export const shortId = (id: string) => `${id.slice(0, 6)}…${id.slice(-4)}`
 /** Display name for a person: their shared name, else @username, else a short id. */
 export const personName = (id: string, p = state.people[id]) => (id === state.me?.id ? 'You' : p?.name || (p?.username ? `@${p.username}` : shortId(id)))
-export const chatTitle = (c: Chat, p?: Person) => (c.id === SAVED ? 'Saved Messages' : c.group ? c.name || 'Group' : personName(c.id, p ?? state.people[c.id]))
-export const chatAvatar = (c: Chat, p?: Person) => (c.group ? c.avatar : (p ?? state.people[c.id])?.avatar)
-export const others = (c: Chat) => (c.id === SAVED ? [] : c.group ? c.group.members.filter((m) => m !== state.me?.id && !c.group!.gone?.includes(m)) : [c.id])
+export const chatTitle = (c: Chat, p?: Person) => (c.id === SAVED ? 'Saved Messages' : c.id === GUIDE ? 'Fog Guide' : c.group ? c.name || 'Group' : personName(c.id, p ?? state.people[c.id]))
+export const chatAvatar = (c: Chat, p?: Person) => (c.id === GUIDE ? GUIDE_AVATAR : c.group ? c.avatar : (p ?? state.people[c.id])?.avatar)
+export const others = (c: Chat) => (isLocalChat(c.id) ? [] : c.group ? c.group.members.filter((m) => m !== state.me?.id && !c.group!.gone?.includes(m)) : [c.id])
 
 // ---------- helpers ----------
 const b64 = (u: Uint8Array) => {
@@ -338,7 +364,7 @@ export async function boot() {
   }
   const saved = await kv<Uint8Array>('account')
   const meta = (await kv<Meta>('meta')) ?? null
-  set({ chats: await loadChats(), people: (await kv<Record<string, Person>>('people')) ?? {}, stickers: (await kv<Att[]>('stickers')) ?? [], blocked: meta?.blocked ?? [] })
+  set({ chats: await loadChats(), people: (await kv<Record<string, Person>>('people')) ?? {}, stickers: (await kv<Att[]>('stickers')) ?? [], gifs: (await kv<Att[]>('gifs')) ?? [], blocked: meta?.blocked ?? [] })
   if (meta?.settings) set({ settings: { ...state.settings, ...meta.settings } })
   applyTheme()
   if (!saved) return set({ phase: 'welcome' })
@@ -373,6 +399,10 @@ export async function createAccount(phrase: string): Promise<void> {
     await kv('account', null)
     throw new Error(signupError)
   }
+  // Restoring from the phrase: the chats come back from the backup, if there is one.
+  await restoreBackup().catch(() => toast("Your account is back, but its chat backup couldn't be restored."))
+  // A brand-new account starts with the guide, as a first chat to try things in.
+  if (!Object.keys(state.chats).length) guide?.start()
   set({ phase: state.me?.username ? 'app' : 'username' })
 }
 let signupError: string | null = null
@@ -396,6 +426,9 @@ export function updateSettings(patch: Partial<Settings>) {
   applyTheme()
   saveMeta()
   if ('notifications' in patch) registerPush()
+  // Backups off: delete the copy on the server too. Back on: make one now.
+  if (patch.backup === false && acct?.is_main) rpc({ t: 'backup', id: '' }).then(() => kv('backup', null), () => {})
+  if (patch.backup === true) void backupNow(true)
 }
 
 /** Update our display name / photo and push it (encrypted) to everyone we've written to. */
@@ -582,6 +615,7 @@ async function onPush(m: any) {
       // Register our access key before anything else goes out (the RPC layer only works once online).
       await rpc({ t: 'access', key: myAk }).catch(() => {})
       registerPush()
+      if (acct!.is_main) void backupSoon()
       retryPending()
       if (state.phase === 'app') handleInvite()
       break
@@ -714,40 +748,103 @@ export function parseLinkCode(code: string) {
 
 type LinkPayload = { v: 1; identity: string; device: number; token: string; ak: string; username: string | null; skipped: boolean; profile: Profile; archive?: ArchiveRef }
 type ArchiveRef = { id: string; key: string; gz: boolean }
-type Archive = { v: 1; chats: Record<string, Chat>; people: Record<string, Person>; stickers: Att[]; blocked: string[] }
+type Archive = { v: 1; chats: Record<string, Chat>; people: Record<string, Person>; stickers: Att[]; gifs?: Att[]; blocked: string[]; profile?: Profile }
 
 const pipe = async (data: Uint8Array, t: CompressionStream | DecompressionStream) => new Uint8Array(await new Response(new Blob([bytes(data)]).stream().pipeThrough(t)).arrayBuffer())
 
-/** Chat history for a new device: encrypted with a fresh key and uploaded like an attachment. */
-async function makeArchive(): Promise<ArchiveRef> {
+/** Our chat history as JSON (gzipped where the browser can). */
+async function packArchive(withProfile = false) {
   // Attachments travel as their encrypted pointers (re-downloaded while the server keeps them);
   // unsent messages stay behind so the new device doesn't send them a second time.
   const chats = Object.fromEntries(
     Object.entries(state.chats).map(([id, c]) => [id, { ...c, typing: undefined, draft: undefined, messages: c.messages.filter((m) => !(m.mine && (m.status === 'sending' || m.status === 'failed'))) }]),
   )
-  const archive: Archive = { v: 1, chats, people: state.people, stickers: state.stickers, blocked: state.blocked }
-  let data = te.encode(JSON.stringify(archive))
+  const archive: Archive = { v: 1, chats, people: state.people, stickers: state.stickers, gifs: state.gifs, blocked: state.blocked, profile: withProfile ? state.profile : undefined }
+  const json = te.encode(JSON.stringify(archive))
   const gz = typeof CompressionStream !== 'undefined'
-  if (gz) data = await pipe(data, new CompressionStream('gzip'))
-  const key = crypto.getRandomValues(new Uint8Array(32))
+  return { data: gz ? await pipe(json, new CompressionStream('gzip')) : json, gz, json }
+}
+
+/** Encrypt (AES-256-GCM, fresh IV) and upload like an attachment. Returns the blob id. */
+async function sealUpload(data: Uint8Array, key: Uint8Array, backup = false) {
   const iv = crypto.getRandomValues(new Uint8Array(12))
-  const k = await crypto.subtle.importKey('raw', key, 'AES-GCM', false, ['encrypt'])
+  const k = await crypto.subtle.importKey('raw', bytes(key), 'AES-GCM', false, ['encrypt'])
   const blob = new Uint8Array([...iv, ...new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, bytes(data)))])
-  const { id } = await rpc({ t: 'upload', size: blob.length })
+  const { id } = await rpc({ t: 'upload', size: blob.length, backup })
   const r = await fetch(`${SERVER.origin}/blob/${id}`, { method: 'PUT', body: blob })
   if (!r.ok) throw new Error('upload failed')
-  return { id, key: b64(key), gz }
+  return id as string
+}
+
+async function openDownload(id: string, key: Uint8Array, gz: boolean): Promise<Archive> {
+  const r = await fetch(`${SERVER.origin}/blob/${id}`)
+  if (!r.ok) throw new Error('download failed')
+  const raw = new Uint8Array(await r.arrayBuffer())
+  const k = await crypto.subtle.importKey('raw', bytes(key), 'AES-GCM', false, ['decrypt'])
+  let data = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes(raw.subarray(0, 12)) }, k, bytes(raw.subarray(12))))
+  if (gz) data = await pipe(data, new DecompressionStream('gzip'))
+  const a: Archive = JSON.parse(td.decode(data))
+  if (a.v !== 1) throw new Error('unknown archive')
+  return a
+}
+
+/** Chat history for a new device: encrypted with a fresh key and uploaded like an attachment. */
+async function makeArchive(): Promise<ArchiveRef> {
+  const { data, gz } = await packArchive()
+  const key = crypto.getRandomValues(new Uint8Array(32))
+  return { id: await sealUpload(data, key), key: b64(key), gz }
 }
 
 async function importArchive(ref: ArchiveRef) {
-  const r = await fetch(`${SERVER.origin}/blob/${ref.id}`)
-  if (!r.ok) throw new Error('download failed')
-  const raw = new Uint8Array(await r.arrayBuffer())
-  const k = await crypto.subtle.importKey('raw', bytes(unb64(ref.key)), 'AES-GCM', false, ['decrypt'])
-  let data = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes(raw.subarray(0, 12)) }, k, bytes(raw.subarray(12))))
-  if (ref.gz) data = await pipe(data, new DecompressionStream('gzip'))
-  const a: Archive = JSON.parse(td.decode(data))
-  if (a.v !== 1) throw new Error('unknown archive')
+  await mergeArchive(await openDownload(ref.id, unb64(ref.key), ref.gz))
+}
+
+/**
+ * Encrypted chat backup. The main device uploads its history once a day (when it changed),
+ * encrypted with a key derived from the recovery phrase, so it opens with the phrase alone, on a new
+ * phone after losing the old one. The server keeps the latest one and only ever sees ciphertext and
+ * its size. Attachments come back while the server still has them (45 days); text is kept for good.
+ */
+const BACKUP_EVERY = 24 * 3_600_000
+export async function backupNow(force = false) {
+  if (!acct?.is_main || state.backup.busy || state.conn !== 'online' || typeof CompressionStream === 'undefined') return
+  if (!force && state.settings.backup === false) return
+  set({ backup: { ...state.backup, busy: true } })
+  try {
+    const { data, json } = await packArchive(true)
+    const hash = b64(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes(json))))
+    const last = await kv<{ at: number; hash: string }>('backup')
+    // Nothing changed since the last one: no need to upload the same thing again.
+    if (!force && last?.hash === hash) return void (await kv('backup', { ...last, at: Date.now() }), set({ backup: { at: Date.now(), busy: false } }))
+    const id = await sealUpload(data, acct.backup_key(), true)
+    await rpc({ t: 'backup', id })
+    await kv('backup', { at: Date.now(), hash })
+    set({ backup: { at: Date.now(), busy: false } })
+    if (force) toast('Chats backed up')
+  } catch {
+    set({ backup: { ...state.backup, busy: false } })
+    if (force) toast("Couldn't back up your chats. Try again in a bit.")
+  }
+}
+async function backupSoon() {
+  const last = await kv<{ at: number }>('backup')
+  if (last) set({ backup: { ...state.backup, at: last.at } })
+  if (!last || Date.now() - last.at > BACKUP_EVERY) setTimeout(() => void backupNow(), 30_000)
+}
+
+/** After restoring an account from its phrase: bring back the chats from its backup, if there is one. */
+async function restoreBackup() {
+  if (!acct?.is_main) return
+  const { id } = await rpc({ t: 'backup' })
+  if (!id) return
+  const a = await openDownload(id, acct.backup_key(), true)
+  await mergeArchive(a)
+  if (a.profile && !state.profile.name) setProfile({ name: a.profile.name, avatar: a.profile.avatar })
+  const n = Object.keys(a.chats).length
+  toast(`Restored ${n} ${n === 1 ? 'chat' : 'chats'} from your backup`)
+}
+
+async function mergeArchive(a: Archive) {
   // Anything that arrived here while the history was on its way wins.
   const chats = { ...a.chats }
   for (const [id, c] of Object.entries(state.chats)) {
@@ -755,10 +852,11 @@ async function importArchive(ref: ArchiveRef) {
     chats[id] = old ? { ...old, messages: [...old.messages, ...c.messages.filter((m) => !old.messages.some((x) => x.id === m.id))], unread: old.unread + c.unread } : c
   }
   Object.keys(chats).forEach((id) => dirty.add(id))
-  set({ chats, people: { ...a.people, ...state.people }, stickers: a.stickers ?? [], blocked: a.blocked ?? [] })
+  set({ chats, people: { ...a.people, ...state.people }, stickers: a.stickers ?? [], gifs: a.gifs ?? [], blocked: a.blocked ?? [] })
   await saveChats()
   await kv('people', state.people)
   await saveStickers()
+  await saveGifs()
   await saveMeta()
 }
 
@@ -864,7 +962,9 @@ function deliver(peer: string, p: Payload) {
     const bytes = pad(te.encode(JSON.stringify(p)))
     // Worth waking their phone for: messages and incoming calls, not receipts, typing or our own syncs.
     // (The server learns this one bit per message; Signal sends the same.)
-    const urgent = p.t === 'text' || (p.t === 'call' && p.k === 'offer')
+    // Incoming calls ring (a 1:1 offer, or a group call starting); offers inside a group call don't.
+    const call = p.t === 'call' && ((p.k === 'offer' && !p.gc) || p.k === 'ring')
+    const urgent = p.t === 'text' || call
     let ak = self ? undefined : state.people[peer]?.ak
     let akRequest = false
     const targets = () => Array.from(acct!.session_devices(peer)).filter((d) => !(self && d === acct!.device))
@@ -877,7 +977,7 @@ function deliver(peer: string, p: Payload) {
         const c = await senderCert()
         const msgs = devices.map((d) => ({ device: d, body: b64(acct!.seal(peer, d, bytes, c, Date.now())) }))
         await saveAccount()
-        const r = await fetch(`${SERVER.origin}/sealed`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: peer, msgs, access: ak, urgent }) })
+        const r = await fetch(`${SERVER.origin}/sealed`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: peer, msgs, access: ak, urgent, call }) })
         if (r.ok) return
         if (r.status === 409) {
           await fixDevices(peer, await r.json())
@@ -895,7 +995,7 @@ function deliver(peer: string, p: Payload) {
       const msgs = devices.map((d) => ({ device: d, body: b64(acct!.encrypt(peer, d, bytes, Date.now())) }))
       await saveAccount()
       try {
-        await rpc({ t: 'send', to: peer, msgs, urgent })
+        await rpc({ t: 'send', to: peer, msgs, urgent, call })
       } catch (e: any) {
         if (e.message !== 'devices') throw e
         await fixDevices(peer, e.data)
@@ -915,6 +1015,7 @@ function deliver(peer: string, p: Payload) {
 
 /** Mirror something we did to our other devices (nothing to do with just one). */
 function mirror(p: Payload) {
+  if ('chat' in p && p.chat === GUIDE) return // the guide lives only on this device
   if (otherDevices().length) deliver(acct!.id, p).catch(() => {})
 }
 
@@ -926,6 +1027,11 @@ async function deliverChat(chatId: string, p: Payload) {
 }
 
 const patchMsg = (chat: string, id: string, patch: Partial<Msg>) => setMsgs(chat, (ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)))
+/** A video's thumbnail came out black (made on an older app): use a frame we grabbed while it played. Local only. */
+export function setVideoThumb(chat: string, id: string, thumb: string) {
+  setMsgs(chat, (ms) => ms.map((m) => (m.id === id && m.att ? { ...m, att: { ...m.att, thumb } } : m)))
+  saveChatsSoon()
+}
 
 /**
  * After blocking someone, replace our sealed-sender access key and re-share it with everyone else,
@@ -962,7 +1068,7 @@ export async function sendMessage(chat: string, text: string, opts: { reply?: st
 export async function sendFiles(chat: string, files: File[], opts: { caption?: string; reply?: string; asFile?: boolean } = {}) {
   for (const [i, f] of files.entries()) {
     if (f.size > MAX_FILE) {
-      toast(`${f.name} is over 100 MB`)
+      toast(`${f.name} is over 2 GB`)
       continue
     }
     try {
@@ -981,6 +1087,7 @@ export async function sendAtt(chat: string, att: Att, text = '', reply?: string)
 
 async function push(chat: string, m: Msg) {
   if (chat === SAVED && !otherDevices().length) return patchMsg(chat, m.id, { status: 'sent' })
+  if (chat === GUIDE) return patchMsg(chat, m.id, { status: 'read' }), guide?.hear(m)
   try {
     let att = m.att
     if (att && !att.id) {
@@ -1047,8 +1154,8 @@ export async function addSticker(file: File) {
     set({ stickers: [att, ...state.stickers] })
     saveStickers()
     toast('Sticker added')
-  } catch {
-    toast("Couldn't add that sticker")
+  } catch (e) {
+    toast((e as Error).message === 'animated_too_large' ? 'Animated stickers can be up to 2 MB' : "Couldn't add that sticker")
   }
 }
 /** Save a received sticker or photo to your stickers (reuses the uploaded blob). */
@@ -1058,6 +1165,32 @@ export function saveSticker(att: Att) {
   saveStickers()
   toast('Saved to your stickers')
 }
+// Saved GIFs: sending one reuses its upload, like a sticker. Nothing goes to a GIF service.
+const saveGifs = () => kv('gifs', state.gifs)
+export const isGif = (a?: Att) => a?.mime === 'image/gif'
+export async function addGif(file: File) {
+  if (file.type !== 'image/gif') return toast('Choose a GIF')
+  try {
+    const att = await upload(await prepare(file), (size) => rpc({ t: 'upload', size }).then((r) => r.id))
+    set({ gifs: [att, ...state.gifs] })
+    saveGifs()
+    toast('GIF saved')
+  } catch {
+    toast("Couldn't add that GIF")
+  }
+}
+/** Save a GIF someone sent to your GIFs. */
+export function saveGif(att: Att) {
+  if (state.gifs.some((g) => g.id === att.id)) return toast('Already in your GIFs')
+  set({ gifs: [{ ...att, kind: 'photo' }, ...state.gifs] })
+  saveGifs()
+  toast('Saved to your GIFs')
+}
+export function removeGif(lid: string) {
+  set({ gifs: state.gifs.filter((g) => g.lid !== lid) })
+  saveGifs()
+}
+
 export function removeSticker(lid: string) {
   set({ stickers: state.stickers.filter((s) => s.lid !== lid) })
   saveStickers()
@@ -1078,6 +1211,7 @@ export async function iceServers(): Promise<RTCIceServer[]> {
 /** Vote in a poll (empty choices retracts). */
 export function vote(chat: string, id: string, c: number[]) {
   setMsgs(chat, (ms) => ms.map((m) => (m.id === id ? { ...m, votes: withVote(m.votes, 'me', c) } : m)))
+  if (chat === GUIDE) return void guide?.voted(id, c)
   deliverChat(chat, { t: 'vote', id, c }).catch(() => toast("Vote wasn't sent. Check your connection."))
   mirror({ t: 'sent', chat, p: { t: 'vote', id, c } })
 }
@@ -1088,20 +1222,55 @@ function withVote(v: Msg['votes'], who: string, c: number[]) {
   return next
 }
 
+// ---------- the Fog guide (script in guide.ts) ----------
+type Guide = { start: () => void; hear: (m: Msg) => void; voted: (id: string, c: number[]) => void }
+let guide: Guide | null = null
+export const setGuide = (g: Guide) => void (guide = g)
+/** Open the guide chat (from Settings), starting it again if it was deleted. */
+export function openGuide() {
+  if (!state.chats[GUIDE]) guide?.start()
+  openChat(GUIDE)
+}
+/** The guide writes a message (shown as typing first, like a person). */
+export function guideSay(text: string, extra: Partial<Msg> = {}, typingMs = 900) {
+  return new Promise<string>((res) => {
+    setChat(GUIDE, (c) => ({ ...c, typing: { by: GUIDE, until: Date.now() + typingMs + 500 } }))
+    setTimeout(() => {
+      const m: Msg = { id: `guide.${crypto.randomUUID()}`, mine: false, from: GUIDE, text, ts: Date.now(), ...extra }
+      setChat(GUIDE, (c) => ({ ...c, typing: undefined, unread: state.active === GUIDE && document.visibilityState === 'visible' ? c.unread : c.unread + 1, messages: [...c.messages, m] }))
+      saveChatsSoon()
+      if (state.active === GUIDE) markRead(GUIDE)
+      res(m.id)
+    }, typingMs)
+  })
+}
+/** The guide reacts to one of your messages. */
+export function guideReact(id: string, emoji: string) {
+  setMsgs(GUIDE, (ms) => ms.map((m) => (m.id === id ? { ...m, re: withReaction(m.re, GUIDE, emoji) } : m)))
+  saveChatsSoon()
+}
+
 // ---------- calls (signaling only; media lives in call.ts) ----------
 type CallSignal = Extract<Payload, { t: 'call' }>
 let onCall: ((from: string, dev: number, p: CallSignal) => void) | null = null
 export const setCallHandler = (f: typeof onCall) => void (onCall = f)
 /** Call signaling rides the Signal session, so SDP (incl. DTLS fingerprints) is end-to-end authenticated. */
 export const sendSignal = (peer: string, p: Omit<CallSignal, 't'>) => deliver(peer, { t: 'call', ...p })
+/** A group call signal for everyone in the group (each copy end-to-end encrypted, like any message). */
+export const sendGroupSignal = (group: string, p: Omit<CallSignal, 't'>) => deliverChat(group, { t: 'call', ...p })
+/** Is `who` a current member of group `gid` (and are we)? */
+export const inGroupCall = (gid: string, who: string) => {
+  const g = state.chats[gid]?.group
+  return !!g && !g.left && g.members.includes(who) && !g.gone?.includes(who)
+}
 /** Tell our other devices to stop ringing: this one answered or declined. */
 export const callHandled = (id: string) => mirror({ t: 'call', id, k: 'elsewhere' })
 
-export function addCallRecord(peer: string, call: CallRecord) {
+export function addCallRecord(peer: string, call: CallRecord, by?: string) {
   const me = state.me!.id
   const missed = !call.out && call.missed
   const req = !state.chats[peer] || !!state.chats[peer].request
-  setChat(peer, (c) => ({ ...c, request: req && !call.out ? true : c.request, unread: missed && state.active !== peer ? c.unread + 1 : c.unread, messages: [...c.messages, sysMsg({ k: 'call', by: call.out ? me : peer, call })] }))
+  setChat(peer, (c) => ({ ...c, request: req && !call.out ? true : c.request, unread: missed && state.active !== peer ? c.unread + 1 : c.unread, messages: [...c.messages, sysMsg({ k: 'call', by: by ?? (call.out ? me : peer), call })] }))
   saveChats()
   if (missed && !req) notify(peer, `Missed ${call.video ? 'video' : 'voice'} call`)
 }
@@ -1422,6 +1591,8 @@ function readAtt(a: any): Att | undefined {
     dur: Number.isFinite(+a.dur) ? Math.min(Math.max(0, +a.dur), 86400) : undefined,
     thumb: imgUrl(a.thumb, 80_000),
     wave: Array.isArray(a.wave) ? a.wave.slice(0, 100).map((v: unknown) => num(v, 0, 31)) : undefined,
+    // Big files come in 4 MB encrypted chunks (the only chunk size there is).
+    ch: a.ch === 4 * 1024 * 1024 ? a.ch : undefined,
   }
 }
 
@@ -1714,6 +1885,10 @@ async function handlePayload(m: { id: number; ts: number }, from: string, dev: n
   } else if (p.t === 'call' && !inGroup && (p.to === undefined || p.to === acct!.device)) {
     const sig = p
     setTimeout(() => onCall?.(from, dev, sig), 0)
+  } else if (p.t === 'call' && inGroup && known && (p.k === 'ring' || p.k === 'hello' || p.k === 'leave' || p.k === 'screen')) {
+    // Group call signals: the sender is a member (checked above), and `gc` is the group itself.
+    const sig = { ...p, gc: chat }
+    setTimeout(() => onCall?.(from, dev, sig), 0)
   } else if (p.t === 'timer' && (known || !inGroup)) {
     const secs = TIMERS.includes(Number(p.s)) ? Number(p.s) : 0
     setChat(chat, (c) => ({ ...fresh(c), timer: secs || undefined, messages: [...c.messages, sysMsg({ k: 'timer', by: from, secs }, m.ts)] }))
@@ -1787,7 +1962,7 @@ export function markRead(id: string) {
   }))
   saveChatsSoon()
   if (unseen.length || c.unread) mirror({ t: 'read', chat: id, at: now })
-  if (!unseen.length || !state.settings.readReceipts || id === SAVED || c.request) return
+  if (!unseen.length || !state.settings.readReceipts || isLocalChat(id) || c.request) return
   if (!c.group) return void deliver(id, { t: 'receipt', ids: unseen.map((m) => m.id), s: 'read' }).catch(() => {})
   // In groups, each sender gets receipts for their own messages.
   const bySender = new Map<string, string[]>()

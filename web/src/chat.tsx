@@ -2,8 +2,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as fog from './fog'
 import { chatAvatar, chatTitle, msgStatus, others, personName, SAVED, timerLabel, useFog, type Chat, type LinkPreview, type Msg, type Poll } from './fog'
-import { startCall } from './call'
-import { fmtDur, fmtSize, MAX_NOTE, previewThumb, record, recordVideoNote, type Att, type Recording, type VideoNoteRec } from './media'
+import { MAX_GROUP_CALL, startCall, startGroupCall } from './call'
+import { fmtDur, fmtSize, MAX_FILE, MAX_NOTE, previewThumb, record, recordVideoNote, type Att, type Recording, type VideoNoteRec } from './media'
 import { Bubble, dayLabel, fullDate, MediaViewer, snippet, Sticker, sysText, Ticks, TextViewer } from './bubble'
 import { Avatar, Button, copy, Dialog, Icon, IconButton, Menu, MenuItem, Spinner, type MenuAt } from './ui'
 
@@ -44,6 +44,9 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
   const [info, setInfo] = useState<Msg | null>(null)
   const [pinIdx, setPinIdx] = useState(0)
   const typing = chat?.typing && chat.typing.until > Date.now() ? chat.typing : null
+  // Mesh calls get heavy past a handful of people: everyone sends to everyone.
+  const groupCall = (video: boolean) =>
+    (chat?.group?.members.length ?? 0) > MAX_GROUP_CALL ? fog.toast(`Group calls are for up to ${MAX_GROUP_CALL} people`) : startGroupCall(id, video)
   const count = chat?.messages.length ?? 0
   const prevCount = useRef(count)
 
@@ -102,8 +105,8 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
   }, [selected])
 
   const matches = useMemo(() => {
-    const q = search?.q.trim().toLowerCase()
-    return q ? (chat?.messages ?? []).filter((m) => !m.sys && (m.text.toLowerCase().includes(q) || m.att?.name.toLowerCase().includes(q))) : []
+    const terms = fog.searchTerms(search?.q ?? '')
+    return terms.length ? (chat?.messages ?? []).filter((m) => fog.msgMatches(m, terms)) : []
   }, [search?.q, chat?.messages])
   useEffect(() => {
     const m = matches[matches.length - 1 - (search?.i ?? 0)]
@@ -137,6 +140,8 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
           : 'typing…'
         : id === SAVED
           ? 'Notes to yourself, on this device'
+          : id === fog.GUIDE
+            ? 'A built-in guide, on this device only'
           : chat.group
           ? `${chat.group.members.length} members`
           : person?.name && person.username
@@ -216,13 +221,19 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
               <p className={`truncate text-sm ${typing ? 'text-lamp' : 'text-muted'}`}>{subtitle}</p>
             </div>
           </button>
-          {!chat.group && id !== SAVED && (
+          {!chat.group && !fog.isLocalChat(id) && (
             <>
               <IconButton icon="video" label="Video call" onClick={() => startCall(id, true)} />
               <IconButton icon="phone" label="Voice call" onClick={() => startCall(id, false)} />
             </>
           )}
-          <IconButton icon="search" label="Search this chat" onClick={() => setSearch({ q: '', i: 0 })} className={!chat.group && id !== SAVED ? 'max-sm:hidden' : ''} />
+          {chat.group && !chat.group.left && !chat.request && (
+            <>
+              <IconButton icon="video" label="Group video call" onClick={() => groupCall(true)} />
+              <IconButton icon="phone" label="Group voice call" onClick={() => groupCall(false)} className="max-sm:hidden" />
+            </>
+          )}
+          <IconButton icon="search" label="Search this chat" onClick={() => setSearch({ q: '', i: 0 })} className={!chat.group && !fog.isLocalChat(id) ? 'max-sm:hidden' : ''} />
           <IconButton icon="info" label="Chat info" onClick={onInfo} className="max-sm:hidden" />
         </header>
       )}
@@ -279,7 +290,7 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
                   )}
                   {m.sys?.k === 'call' ? (
                     <button
-                      onClick={() => startCall(id, !!m.sys!.call!.video)}
+                      onClick={() => (m.sys!.call!.group ? groupCall(!!m.sys!.call!.video) : startCall(id, !!m.sys!.call!.video))}
                       title="Call back"
                       className={`my-2 flex items-center gap-2 self-center rounded-full px-3 py-1 text-[13px] backdrop-blur-md transition hover:brightness-110 ${m.sys.call!.missed ? 'bg-danger/80 text-white' : 'bg-black/25 text-white dark:bg-white/10'}`}
                     >
@@ -410,6 +421,7 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
           {!left && <MenuItem icon="reply" label="Reply" onClick={() => (setEditing(null), setReply(menu.m), setMenu(null))} />}
           {menu.m.text && <MenuItem icon="copy" label="Copy text" onClick={() => (copy(menu.m.text), setMenu(null))} />}
           {menu.m.mine && menu.m.text && !left && <MenuItem icon="pencil" label="Edit" onClick={() => (setReply(null), setEditing(menu.m), setMenu(null))} />}
+          {menu.m.att?.id && fog.isGif(menu.m.att) && menu.m.att.kind !== 'sticker' && <MenuItem icon="image" label="Save GIF" onClick={() => (fog.saveGif(menu.m.att!), setMenu(null))} />}
           {menu.m.att?.id && (menu.m.att.kind === 'sticker' || menu.m.att.kind === 'photo') && (
             <MenuItem icon="sticker" label={menu.m.att.kind === 'sticker' ? 'Save sticker' : 'Add to stickers'} onClick={() => (fog.saveSticker(menu.m.att!), setMenu(null))} />
           )}
@@ -421,7 +433,7 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
             />
           )}
           <MenuItem icon="forward" label="Forward" onClick={() => (setForwarding([menu.m.id]), setMenu(null))} />
-          {menu.m.mine && id !== SAVED && <MenuItem icon="info" label="Info" onClick={() => (setInfo(menu.m), setMenu(null))} />}
+          {menu.m.mine && !fog.isLocalChat(id) && <MenuItem icon="info" label="Info" onClick={() => (setInfo(menu.m), setMenu(null))} />}
           <MenuItem icon="select" label="Select" onClick={() => (setSelected(new Set([menu.m.id])), setMenu(null))} />
           <MenuItem icon="trash" label="Delete" danger onClick={() => (setDeleting([menu.m]), setMenu(null))} />
         </Menu>
@@ -658,7 +670,6 @@ function AttachDialog({ files, onClose, onSend }: { files: File[]; onClose: () =
   const previews = useMemo(() => files.map((f) => (f.type.startsWith('image/') || f.type.startsWith('video/') ? URL.createObjectURL(f) : null)), [files])
   useEffect(() => () => previews.forEach((u) => u && URL.revokeObjectURL(u)), [previews])
   const visual = files.some((f) => f.type.startsWith('image/') || f.type.startsWith('video/'))
-  const total = files.reduce((n, f) => n + f.size, 0)
   return (
     <Dialog
       title={files.length === 1 ? (visual && !asFile ? (files[0].type.startsWith('video/') ? 'Send video' : 'Send photo') : 'Send file') : `Send ${files.length} items`}
@@ -699,7 +710,7 @@ function AttachDialog({ files, onClose, onSend }: { files: File[]; onClose: () =
           Send without compression
         </label>
       )}
-      {total > 100 * 1024 * 1024 && <p className="mt-2 text-sm text-danger">Files over 100 MB will be skipped.</p>}
+      {files.some((f) => f.size > MAX_FILE) && <p className="mt-2 text-sm text-danger">Files over 2 GB will be skipped.</p>}
       <input
         value={caption}
         onChange={(e) => setCaption(e.target.value)}
@@ -735,7 +746,10 @@ const readRecent = (): string[] => {
 function EmojiPanel({ onPick, onClose, onSticker }: { onPick: (e: string) => void; onClose: () => void; onSticker?: (a: Att) => void }) {
   const ref = useRef<HTMLDivElement>(null)
   const stickers = useFog((s) => s.stickers)
+  const gifs = useFog((s) => s.gifs)
+  const [gifQ, setGifQ] = useState('')
   const addInput = useRef<HTMLInputElement>(null)
+  const addGif = useRef<HTMLInputElement>(null)
   const [recent] = useState(readRecent)
   const groups: [string, string[]][] = [...(recent.length ? [['Recent', recent] as [string, string[]]] : []), ...EMOJI.map(([n, s]) => [n, s.split(' ')] as [string, string[]])]
   const [tab, setTab] = useState(onSticker && stickers.length ? 'Stickers' : groups[0][0])
@@ -761,14 +775,50 @@ function EmojiPanel({ onPick, onClose, onSticker }: { onPick: (e: string) => voi
             <Icon name="sticker" className="size-5" />
           </button>
         )}
+        {onSticker && (
+          <button onClick={() => setTab('GIFs')} title="GIFs" aria-label="GIFs" className={`grid h-9 shrink-0 place-items-center rounded-lg px-2 text-xs font-bold transition ${tab === 'GIFs' ? 'bg-lamp/25 text-lamp' : 'text-muted hover:bg-hover'}`}>
+            GIF
+          </button>
+        )}
         {groups.map(([name, list]) => (
           <button key={name} onClick={() => setTab(name)} title={name} className={`grid size-9 shrink-0 place-items-center rounded-lg text-xl transition ${tab === name ? 'bg-lamp/25' : 'hover:bg-hover'}`}>
             {name === 'Recent' ? '🕘' : list[0]}
           </button>
         ))}
       </div>
-      <p className="px-3 pt-2 text-xs font-semibold text-muted">{tab === 'Stickers' ? 'Your stickers' : tab}</p>
-      {tab === 'Stickers' ? (
+      <p className="px-3 pt-2 text-xs font-semibold text-muted">{tab === 'Stickers' ? 'Your stickers' : tab === 'GIFs' ? 'Your GIFs' : tab}</p>
+      {tab === 'GIFs' ? (
+        <div className="flex h-56 flex-col">
+          {gifs.length > 3 && (
+            <input
+              value={gifQ}
+              onChange={(e) => setGifQ(e.target.value)}
+              placeholder="Search your GIFs"
+              aria-label="Search your GIFs"
+              className="mx-1.5 mt-1.5 rounded-lg bg-raised px-3 py-1.5 text-base text-ink outline-none placeholder:text-muted sm:text-sm"
+            />
+          )}
+          <div className="scroll-thin grid min-h-0 flex-1 grid-cols-3 content-start gap-1 overflow-y-auto p-1.5">
+            <button onClick={() => addGif.current?.click()} className="grid aspect-square place-items-center rounded-xl border-2 border-dashed border-line text-muted transition hover:border-lamp hover:text-lamp" aria-label="Add a GIF">
+              <Icon name="plus" />
+            </button>
+            <input ref={addGif} type="file" accept="image/gif" hidden onChange={(e) => (e.target.files?.[0] && fog.addGif(e.target.files[0]), (e.target.value = ''))} />
+            {gifs
+              .filter((g) => fog.searchTerms(gifQ).every((t) => fog.fold(g.name).includes(t)))
+              .map((g) => (
+                <div key={g.lid} className="group relative">
+                  <button onClick={() => onSticker!(g)} className="grid aspect-square w-full place-items-center overflow-hidden rounded-xl bg-raised transition hover:brightness-95" aria-label={`Send GIF ${g.name}`} title={g.name}>
+                    <Sticker a={g} size={104} />
+                  </button>
+                  <button onClick={() => fog.removeGif(g.lid)} aria-label="Remove GIF" className="absolute -top-1 -right-1 hidden size-5 place-items-center rounded-full bg-panel text-muted shadow group-hover:grid">
+                    <Icon name="close" className="size-3" />
+                  </button>
+                </div>
+              ))}
+            {!gifs.length && <p className="col-span-2 self-center px-2 text-xs text-muted">Add GIFs from your device, or save one someone sends you from its menu. They stay private: no GIF service is involved.</p>}
+          </div>
+        </div>
+      ) : tab === 'Stickers' ? (
         <div className="scroll-thin grid h-56 grid-cols-4 content-start gap-1 overflow-y-auto p-1.5">
           <button onClick={() => addInput.current?.click()} className="grid aspect-square place-items-center rounded-xl border-2 border-dashed border-line text-muted transition hover:border-lamp hover:text-lamp" aria-label="Add a sticker">
             <Icon name="plus" />
@@ -959,7 +1009,7 @@ function Composer(props: {
   const linkPreviews = useFog((s) => s.settings.linkPreviews)
   const [link, setLink] = useState<LinkPreview | 'loading' | null>(null)
   const [dismissed, setDismissed] = useState<string | null>(null)
-  const typedUrl = linkPreviews && !editing && id !== SAVED ? (/https?:\/\/[^\s<]+[^\s<.,:;"')\]!?]/.exec(text)?.[0] ?? null) : null
+  const typedUrl = linkPreviews && !editing && !fog.isLocalChat(id) ? (/https?:\/\/[^\s<]+[^\s<.,:;"')\]!?]/.exec(text)?.[0] ?? null) : null
   useEffect(() => {
     if (!typedUrl || typedUrl === dismissed) return setLink(null)
     setLink('loading')
@@ -1245,7 +1295,7 @@ function Composer(props: {
               }
             }}
           />
-          {id !== SAVED && <MenuItem icon="poll" label="Poll" onClick={() => (setAttachMenu(null), setPolling(true))} />}
+          {!fog.isLocalChat(id) && <MenuItem icon="poll" label="Poll" onClick={() => (setAttachMenu(null), setPolling(true))} />}
         </Menu>
       )}
       {note && (

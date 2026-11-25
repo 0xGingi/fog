@@ -20,6 +20,9 @@ const ID_INFO: &[u8] = b"fog/identity/v1";
 /// Main-device key: also derived from the phrase, never given to linked devices. The server only
 /// lets device 1 log in (and link or unlink devices) with a signature from it.
 const MAIN_INFO: &[u8] = b"fog/main-device/v1";
+/// Chat backups: an AES-256 key from the phrase, so a backup opens with the phrase alone (on a new
+/// phone after losing the old one) and with nothing else. The server only ever holds ciphertext.
+const BACKUP_INFO: &[u8] = b"fog/backup/v1";
 /// Saved-state format marker. State saved before multi-device has no prefix (and is device 1).
 const STATE_V2: &[u8] = b"\xF0FG2";
 
@@ -350,6 +353,14 @@ impl Account {
             return Err(err("only the main device has this key"));
         }
         PrivateKey::deserialize(&phrase_seed(&self.st.phrase, MAIN_INFO)?.1).map_err(err)
+    }
+
+    /// The 32-byte key chat backups are encrypted with (main device only).
+    pub fn backup_key(&self) -> R<Vec<u8>> {
+        if !self.is_main() {
+            return Err(err("only the main device has this key"));
+        }
+        Ok(phrase_seed(&self.st.phrase, BACKUP_INFO)?.1.to_vec())
     }
 
     /// Public half of the main-device key (base64url, same format as an account id).
@@ -871,6 +882,19 @@ mod tests {
         assert!(bob.safety_compare(&alice.id(), &alice.safety_qr(&bob.id()).unwrap()).unwrap());
         // A code for a different pair doesn't verify.
         assert!(!bob.safety_compare(&alice.id(), &carol.safety_qr(&bob.id()).unwrap()).unwrap_or(false));
+    }
+
+    #[test]
+    fn backup_key_comes_from_the_phrase_alone() {
+        let phrase = new_mnemonic();
+        let a = Account::create(&phrase, 0.0).unwrap();
+        let b = Account::create(&phrase, 1.0).unwrap();
+        assert_eq!(a.backup_key().unwrap(), b.backup_key().unwrap(), "same phrase, same key, on any device");
+        assert_eq!(a.backup_key().unwrap().len(), 32);
+        assert_ne!(a.backup_key().unwrap(), Account::create(&new_mnemonic(), 0.0).unwrap().backup_key().unwrap());
+        assert_ne!(a.backup_key().unwrap(), phrase_seed(&phrase, ID_INFO).unwrap().1.to_vec(), "not the identity key");
+        let linked = Account::create_linked(&a.link_identity().unwrap(), 2, 0.0).unwrap();
+        assert!(linked.backup_key().is_err(), "linked devices never get it");
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import { App } from './App'
 import { boot } from './fog'
+import './guide'
 
 // Safari on iPhone/iPad: the keyboard covers the page instead of shrinking it, and WebKit scrolls the
 // whole page up to keep the text box visible, pushing the chat header off screen. Instead, size the

@@ -27,6 +27,13 @@ import app.tauri.plugin.Plugin
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
+import com.google.firebase.messaging.RemoteMessage
+import android.app.Notification
+import android.app.PendingIntent
+import android.media.AudioAttributes
+import android.media.RingtoneManager
+import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
 import org.json.JSONObject
 import java.net.URL
 import kotlin.concurrent.thread
@@ -124,6 +131,66 @@ class FogMessagingService : FirebaseMessagingService() {
         getSharedPreferences("fog", Context.MODE_PRIVATE).edit().putString("push", token).apply()
         FogPlugin.answer { it.resolve(JSObject().apply { put("token", token) }) }
     }
+
+    // Calls arrive as data-only pushes (messages are notifications Android shows by itself).
+    override fun onMessageReceived(message: RemoteMessage) {
+        if (message.data["type"] == "call") Ringing.show(this)
+    }
+}
+
+/**
+ * An incoming call while Fog is closed: a full-screen ringing screen over the lock screen (or a
+ * heads-up if Android doesn't allow full-screen), with the ringtone, until it's answered, declined
+ * or 45 seconds pass. The push says only that there's a call; Fog shows who once it opens.
+ */
+object Ringing {
+    private const val CHANNEL = "calls"
+    private const val ID = 4242
+
+    fun show(ctx: Context) {
+        val nm = ctx.getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL, "Calls", NotificationManager.IMPORTANCE_HIGH).apply {
+                setSound(
+                    RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
+                    AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build(),
+                )
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 800, 700, 800, 700)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            },
+        )
+        val open = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)!!.apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra("fog_call", true)
+        }
+        val answer = PendingIntent.getActivity(ctx, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val decline = PendingIntent.getBroadcast(ctx, 1, Intent(ctx, DeclineCall::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val caller = Person.Builder().setName("Fog").setImportant(true).build()
+        val n = NotificationCompat.Builder(ctx, CHANNEL)
+            .setSmallIcon(R.drawable.ic_fog_notification)
+            .setContentTitle("Incoming call")
+            .setContentText("Open Fog to answer")
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(true)
+            .setAutoCancel(true)
+            .setContentIntent(answer)
+            .setFullScreenIntent(answer, true)
+            .setTimeoutAfter(45_000)
+            .setStyle(NotificationCompat.CallStyle.forIncomingCall(caller, decline, answer))
+            .build()
+        n.flags = n.flags or Notification.FLAG_INSISTENT // keep ringing, like a phone call
+        nm.notify(ID, n)
+    }
+
+    fun stop(ctx: Context) = ctx.getSystemService(NotificationManager::class.java).cancel(ID)
+}
+
+/** "Decline" on the ringing screen: stop ringing. (The caller sees no answer.) */
+class DeclineCall : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) = Ringing.stop(context)
 }
 
 /** "0.10.0" > "0.9.3": compare dotted numbers part by part. */

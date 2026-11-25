@@ -11,6 +11,7 @@ class FogPlugin: Plugin {
   var offset: NSKeyValueObservation?
 
   override func load(webview: WKWebView) {
+    FogPlugin.makeRingtone()
     FogPlugin.hideKeyboardToolbar(webview)
     fitAboveKeyboard(webview)
     // Opening Fog clears its "New message" notifications.
@@ -46,6 +47,43 @@ class FogPlugin: Plugin {
       let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
       webview.evaluateJavaScript("window.__fogKeyboard?.(\(covered), \(duration))")
     }
+  }
+
+  /// Incoming-call pushes ring with "fog-ring.wav", which iOS looks for in Library/Sounds. It's made
+  /// here (the same two-note chime the app plays in-call, repeated for 28 s; iOS caps it at 30 s), so
+  /// there's no audio file to ship.
+  static func makeRingtone() {
+    guard let lib = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first else { return }
+    let dir = lib.appendingPathComponent("Sounds")
+    let file = dir.appendingPathComponent("fog-ring.wav")
+    if FileManager.default.fileExists(atPath: file.path) { return }
+    let rate = 22_050.0
+    let seconds = 28.0
+    var pcm = [Int16](repeating: 0, count: Int(rate * seconds))
+    let notes: [(Double, Double)] = [(784, 0), (988, 0.18), (784, 0.6), (988, 0.78)]
+    var start = 0.0
+    while start < seconds {
+      for (freq, at) in notes {
+        let begin = Int((start + at) * rate)
+        let len = Int(0.16 * rate)
+        for i in 0..<len where begin + i < pcm.count {
+          let t = Double(i) / rate
+          let env = min(1, t / 0.02) * min(1, (0.16 - t) / 0.05) // soft attack and release
+          pcm[begin + i] = Int16(sin(2 * .pi * freq * t) * env * 0.5 * Double(Int16.max))
+        }
+      }
+      start += 2.2
+    }
+    var data = Data()
+    func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+    func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+    let body = UInt32(pcm.count * 2)
+    data.append(contentsOf: Array("RIFF".utf8)); u32(36 + body); data.append(contentsOf: Array("WAVE".utf8))
+    data.append(contentsOf: Array("fmt ".utf8)); u32(16); u16(1); u16(1); u32(UInt32(rate)); u32(UInt32(rate) * 2); u16(2); u16(16)
+    data.append(contentsOf: Array("data".utf8)); u32(body)
+    pcm.withUnsafeBytes { data.append(contentsOf: $0) }
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try? data.write(to: file)
   }
 
   /// Web views put a form toolbar (up / down / done) above the keyboard. A chat app doesn't want it:

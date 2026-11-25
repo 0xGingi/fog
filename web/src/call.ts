@@ -1,5 +1,7 @@
-// 1:1 voice/video calls. WebRTC media goes peer to peer (DTLS-SRTP); the offer/answer, and with
-// them the DTLS fingerprints, travel inside the Signal session, so nobody can sit in the middle.
+// Voice/video calls, 1:1 and in groups. WebRTC media is encrypted end to end (DTLS-SRTP); the
+// offers/answers, and with them the DTLS fingerprints, travel inside the Signal session, so nobody
+// can sit in the middle. Group calls are a mesh (everyone connects to everyone, up to 8 people),
+// always through our TURN relay, so nobody in the call learns anyone else's IP address.
 import { useSyncExternalStore } from 'react'
 import * as fog from './fog'
 
@@ -22,7 +24,16 @@ export type Call = {
   ended?: string
   /** Which of the peer's devices we're talking to (they may have several; all of yours ring). */
   dev?: number
+  /** Group calls: the group (`peer` is the group too), whether we're in it, and who else is. */
+  group?: string
+  /** Who started the group call. */
+  from?: string
+  joined?: boolean
+  peers?: Record<string, GroupPeer>
 }
+/** Someone in a group call: one of their devices, keyed "<account>.<device>". */
+export type GroupPeer = { who: string; stream?: MediaStream; connected: boolean; sharing?: boolean }
+export const MAX_GROUP_CALL = 8
 
 let call: Call | null = null
 /** Read through a function so TypeScript doesn't narrow across awaits (the call can end meanwhile). */
@@ -102,6 +113,7 @@ export async function startCall(peer: string, video: boolean) {
 }
 
 export async function accept(video = call?.video ?? false) {
+  if (call?.group) return acceptGroup(video)
   if (!call || call.out || call.phase !== 'ringing' || !offer) return
   const c = call
   tone(null)
@@ -125,8 +137,20 @@ export async function accept(video = call?.video ?? false) {
 
 const signal = (k: 'end' | 'decline' | 'busy', to = call) => to && fog.sendSignal(to.peer, { id: to.id, k, to: to.dev }).catch(() => {})
 
-export const decline = () => (signal('decline'), fog.callHandled(call?.id ?? ''), finish('Declined', true))
-export const hangup = () => (signal('end'), finish(call?.started ? 'Call ended' : 'Cancelled'))
+export const decline = () => {
+  // A group call just stops ringing here; the others carry on.
+  if (!call?.group) signal('decline')
+  fog.callHandled(call?.id ?? '')
+  finish('Declined', true)
+}
+export const hangup = () => {
+  if (call?.group) {
+    if (call.joined) fog.sendGroupSignal(call.group, { id: call.id, k: 'leave' }).catch(() => {})
+    return finish(call.started ? 'Left the call' : 'Cancelled')
+  }
+  signal('end')
+  finish(call?.started ? 'Call ended' : 'Cancelled')
+}
 
 export function toggleMute() {
   if (!call?.local) return
@@ -143,26 +167,28 @@ export function toggleCam() {
 }
 
 /** Tell the other side, so they show the screen whole (fitted, zoomable) rather than cropped like a face. */
-const sharing = (on: boolean) => call && fog.sendSignal(call.peer, { id: call.id, k: 'screen', on, to: call.dev }).catch(() => {})
+const sharing = (on: boolean) =>
+  call && (call.group ? fog.sendGroupSignal(call.group, { id: call.id, k: 'screen', on }) : fog.sendSignal(call.peer, { id: call.id, k: 'screen', on, to: call.dev })).catch(() => {})
 
 /** Swap the outgoing camera track for a screen capture (and back). Video calls only. */
 let screenTrack: MediaStreamTrack | null = null
 export async function toggleScreen() {
-  if (!call?.video || !pc) return
-  const sender = pc.getSenders().find((s) => s.track?.kind === 'video' || (screenTrack && s.track === screenTrack))
+  const conns = call?.group ? [...gpeers.values()].map((g) => g.pc) : pc ? [pc] : []
+  if (!call?.video || !conns.length) return
+  const videoSenders = () => conns.map((c) => c.getSenders().find((s) => s.track?.kind === 'video' || (screenTrack && s.track === screenTrack))).filter((s): s is RTCRtpSender => !!s)
   const cam = call.local?.getVideoTracks()[0]
-  if (!sender || !cam) return
+  if (!videoSenders().length || !cam) return
   if (screenTrack) {
     screenTrack.stop()
     screenTrack = null
-    await sender.replaceTrack(cam)
+    await Promise.all(videoSenders().map((s) => s.replaceTrack(cam)))
     sharing(false)
     return patch({ sharing: false, screen: undefined })
   }
   try {
     const display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
     screenTrack = display.getVideoTracks()[0]
-    await sender.replaceTrack(screenTrack)
+    await Promise.all(videoSenders().map((s) => s.replaceTrack(screenTrack)))
     // The browser's own "Stop sharing" button ends the track: switch back to the camera.
     screenTrack.onended = () => screenTrack && toggleScreen()
     sharing(true)
@@ -181,17 +207,21 @@ function finish(reason: string, declinedByMe = false, record = true) {
   pc?.close()
   pc = null
   offer = null
+  gpeers.forEach((g) => g.pc.close())
+  gpeers.clear()
   screenTrack?.stop()
   screenTrack = null
   c.local?.getTracks().forEach((t) => t.stop())
   const dur = c.started ? (Date.now() - c.started) / 1000 : undefined
-  if (record) fog.addCallRecord(c.peer, { out: c.out, video: c.video, dur, missed: !c.out && !c.started && !declinedByMe, declined: declinedByMe || reason === 'Declined' })
+  if (record && c.group) fog.addCallRecord(c.peer, { out: c.out, video: c.video, dur, group: true, missed: !c.started }, c.out ? undefined : c.from)
+  else if (record) fog.addCallRecord(c.peer, { out: c.out, video: c.video, dur, missed: !c.out && !c.started && !declinedByMe, declined: declinedByMe || reason === 'Declined' })
   set({ ...c, phase: 'ended', ended: reason, local: undefined, remote: undefined })
   setTimeout(() => call?.id === c.id && set(null), 1400)
 }
 
 fog.setCallHandler((from, dev, p) => {
   if (typeof p.id !== 'string' || p.id.length > 64) return
+  if (p.gc) return groupSignal(from, dev, p)
   // Another of our devices picked this call up (or declined it): stop ringing here.
   if (p.k === 'elsewhere') {
     if (from === fog.getState().me?.id && call?.id === p.id && !call.out && call.phase === 'ringing') finish('Answered on another device', false, false)
@@ -232,6 +262,150 @@ fog.setCallHandler((from, dev, p) => {
   if (p.k === 'decline') finish('Declined')
   if (p.k === 'busy') finish('Busy on another call')
 })
+
+// ---------- group calls ----------
+// Signalling: 'ring' (someone started a call), 'hello' (someone joined) and 'leave' go to the whole
+// group. Whoever is already in the call answers a 'hello' by connecting to the newcomer (offer ->
+// answer, device to device), so two people never offer to each other at once.
+const gpeers = new Map<string, { pc: RTCPeerConnection; who: string; dev: number }>()
+/** Who's in the call (or ringing it) as far as we've heard, for knowing when it's over. */
+const present = new Set<string>()
+const keyOf = (who: string, dev: number) => `${who}.${dev}`
+const setPeer = (key: string, p: Partial<GroupPeer> | null) => {
+  if (!call) return
+  const peers = { ...call.peers }
+  if (p) peers[key] = { ...(peers[key] ?? { who: key.split('.')[0], connected: false }), ...p }
+  else delete peers[key]
+  patch({ peers })
+}
+
+async function groupPc(key: string, who: string, dev: number) {
+  const old = gpeers.get(key)
+  if (old) return old.pc
+  // Always relayed: a group can include people you've never met.
+  const p = new RTCPeerConnection({ iceServers: await fog.iceServers(), iceTransportPolicy: 'relay' })
+  gpeers.set(key, { pc: p, who, dev })
+  const local = call?.local
+  local?.getTracks().forEach((t) => p.addTrack(screenTrack && t.kind === 'video' ? screenTrack : t, local))
+  const stream = new MediaStream()
+  p.ontrack = (e) => {
+    stream.addTrack(e.track)
+    setPeer(key, { stream })
+  }
+  p.onconnectionstatechange = () => {
+    if (gpeers.get(key)?.pc !== p) return
+    if (p.connectionState === 'connected') {
+      setPeer(key, { connected: true })
+      if (call && !call.started) (tone(null), clearTimeout(timer), patch({ phase: 'active', started: Date.now() }))
+    }
+    if (p.connectionState === 'failed' || p.connectionState === 'closed') dropPeer(key)
+  }
+  setPeer(key, { connected: false, stream })
+  return p
+}
+function dropPeer(key: string) {
+  gpeers.get(key)?.pc.close()
+  gpeers.delete(key)
+  present.delete(key)
+  setPeer(key, null)
+  // Everyone else left: the call is over for us too.
+  if (call?.joined && call.started && !gpeers.size) {
+    fog.sendGroupSignal(call.group!, { id: call.id, k: 'leave' }).catch(() => {})
+    finish('Call ended')
+  }
+}
+
+export async function startGroupCall(group: string, video: boolean) {
+  if (call) return fog.toast("You're already in a call")
+  let stream: MediaStream
+  try {
+    stream = await media(video)
+  } catch {
+    return fog.toast(`Fog needs ${video ? 'camera and microphone' : 'microphone'} access to call`)
+  }
+  const id = crypto.randomUUID()
+  present.clear()
+  set({ id, peer: group, group, out: true, video, phase: 'ringing', muted: false, camOff: false, local: stream, joined: true, peers: {} })
+  tone('ringback')
+  timer = window.setTimeout(() => current()?.id === id && !current()?.started && hangup(), 45_000)
+  fog.sendGroupSignal(group, { id, k: 'ring', video }).catch(() => finish("Couldn't reach the group"))
+}
+
+async function acceptGroup(video: boolean) {
+  const c = call
+  if (!c?.group || c.joined) return
+  tone(null)
+  clearTimeout(timer)
+  let stream: MediaStream
+  try {
+    stream = await media(video)
+  } catch {
+    fog.toast(`Fog needs ${video ? 'camera and microphone' : 'microphone'} access to join`)
+    return decline()
+  }
+  if (current()?.id !== c.id) return stream.getTracks().forEach((t) => t.stop())
+  if (present.size >= MAX_GROUP_CALL) {
+    stream.getTracks().forEach((t) => t.stop())
+    fog.toast(`Group calls are limited to ${MAX_GROUP_CALL} people`)
+    return finish('Call full', false, false)
+  }
+  patch({ phase: 'connecting', local: stream, video, joined: true })
+  fog.callHandled(c.id)
+  fog.sendGroupSignal(c.group, { id: c.id, k: 'hello' }).catch(() => finish("Couldn't reach the group"))
+  // Nobody connects within a while (they all left meanwhile): give up.
+  timer = window.setTimeout(() => current()?.id === c.id && !current()?.started && finish("Couldn't connect"), 30_000)
+}
+
+async function groupSignal(from: string, dev: number, p: { id: string; k: string; gc?: string; sdp?: string; video?: boolean; on?: boolean }) {
+  const gid = p.gc!
+  // Only members of the group (and only while we're in it ourselves).
+  if (!fog.inGroupCall(gid, from) || fog.isBlocked(from)) return
+  const key = keyOf(from, dev)
+  if (p.k === 'ring') {
+    if (call || fog.getState().chats[gid]?.request) return // busy, or a group we haven't accepted
+    present.clear()
+    present.add(key)
+    set({ id: p.id, peer: gid, group: gid, from, out: false, video: !!p.video, phase: 'ringing', muted: false, camOff: false, joined: false, peers: {} })
+    tone('ring')
+    const id = p.id
+    timer = window.setTimeout(() => call?.id === id && !call.joined && finish('Missed'), 45_000)
+    return
+  }
+  if (call?.id !== p.id || call.group !== gid) return
+  if (p.k === 'hello') {
+    present.add(key)
+    if (!call.joined || gpeers.has(key) || gpeers.size + 1 >= MAX_GROUP_CALL) return
+    const pcx = await groupPc(key, from, dev)
+    await pcx.setLocalDescription(await pcx.createOffer())
+    await gathered(pcx)
+    if (current()?.id !== p.id) return
+    fog.sendSignal(from, { id: p.id, k: 'offer', sdp: pcx.localDescription!.sdp, gc: gid, to: dev, video: call.video }).catch(() => dropPeer(key))
+    if (call.sharing) sharing(true)
+    return
+  }
+  if (p.k === 'offer' && call.joined && typeof p.sdp === 'string' && p.sdp.length <= 30_000) {
+    present.add(key)
+    const pcx = await groupPc(key, from, dev)
+    await pcx.setRemoteDescription({ type: 'offer', sdp: p.sdp })
+    await pcx.setLocalDescription(await pcx.createAnswer())
+    await gathered(pcx)
+    if (current()?.id !== p.id) return
+    fog.sendSignal(from, { id: p.id, k: 'answer', sdp: pcx.localDescription!.sdp, gc: gid, to: dev }).catch(() => dropPeer(key))
+    if (call.sharing) sharing(true)
+    return
+  }
+  if (p.k === 'answer' && typeof p.sdp === 'string' && p.sdp.length <= 30_000) {
+    gpeers.get(key)?.pc.setRemoteDescription({ type: 'answer', sdp: p.sdp }).catch(() => dropPeer(key))
+    return
+  }
+  if (p.k === 'screen') return setPeer(key, { sharing: p.on === true })
+  if (p.k === 'leave') {
+    present.delete(key)
+    if (gpeers.has(key)) return dropPeer(key)
+    // Still ringing here and everyone has gone: stop ringing.
+    if (!call.joined && !present.size) finish('Missed')
+  }
+}
 
 // ---------- tones (synthesised) ----------
 let ac: AudioContext | null = null

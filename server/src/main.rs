@@ -32,9 +32,13 @@ use tokio::sync::mpsc;
 const MAX_BODY: usize = 256 * 1024;
 const MAX_PREKEYS: usize = 200;
 /// Attachments are encrypted client-side (AES-256-GCM, key inside the E2EE message); we only store ciphertext.
-const MAX_BLOB: u64 = 110 * 1024 * 1024; // 100 MB files plus up to ~5% size-bucket padding
+const MAX_BLOB: u64 = 110 * 1024 * 1024; // one-request uploads: 100 MB files plus ~5% size-bucket padding
+/// Big files (up to 2 GB, plus padding and per-chunk tags) go up in parts and can resume.
+const MAX_LARGE_BLOB: u64 = 2200 * 1024 * 1024;
+/// One part of a resumable upload (the app sends 4 MB chunks).
+const MAX_PART: usize = 16 * 1024 * 1024;
 /// Abuse limits.
-const UPLOAD_BYTES_PER_DAY: u64 = 2 * 1024 * 1024 * 1024;
+const UPLOAD_BYTES_PER_DAY: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_QUEUED_PER_RECIPIENT: i64 = 10_000;
 /// Bytes of undelivered messages per recipient.
 const MAX_QUEUED_BYTES: i64 = 256 * 1024 * 1024;
@@ -61,6 +65,8 @@ struct App {
     blobs: PathBuf,
     /// Upload slots handed out over the authenticated socket: id -> (max size, expiry).
     uploads: Mutex<HashMap<String, (u64, Instant)>>,
+    /// Upload slots reserved for a chat backup: id -> (account, expiry).
+    backup_slots: Mutex<HashMap<String, (String, Instant)>>,
     /// Public hostname for STUN/TURN (defaults to the Host the client connected to).
     ice_host: Option<String>,
     /// Shared secret with coturn (`use-auth-secret`) for short-lived TURN credentials.
@@ -81,7 +87,7 @@ struct App {
     server_key: Vec<u8>,
     /// Push notifications (APNs / FCM), and the queue of devices to wake.
     pusher: push::Pusher,
-    wakes: mpsc::UnboundedSender<(String, u32)>,
+    wakes: mpsc::UnboundedSender<(String, u32, bool)>,
 }
 
 /// Token buckets keyed by e.g. "send:<account>" or "signup:<ip>".
@@ -199,6 +205,8 @@ async fn main() {
     std::fs::create_dir_all(&blobs).expect("blob dir");
     // Accounts may register an access key that gates sealed (sender-less) delivery to them.
     let _ = db.execute("ALTER TABLE accounts ADD COLUMN access TEXT", []);
+    // The blob holding the account's encrypted chat backup (kept past the attachment expiry).
+    let _ = db.execute("ALTER TABLE accounts ADD COLUMN backup TEXT", []);
     let (trust_root, server_cert, server_key) = sealed_keys(&db, &std::path::Path::new(&db_path).with_file_name("trust-root.key"));
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let (wakes, wake_rx) = mpsc::unbounded_channel();
@@ -209,6 +217,7 @@ async fn main() {
         channels: Mutex::default(),
         blobs,
         uploads: Mutex::default(),
+        backup_slots: Mutex::default(),
         ice_host: env("FOG_ICE_HOST"),
         turn_secret: env("FOG_TURN_SECRET"),
         limits: Limiter::default(),
@@ -243,6 +252,7 @@ async fn main() {
         .route("/ws", get(upgrade))
         .route("/link", get(link_upgrade))
         .route("/blob/{id}", get(get_blob).put(put_blob).layer(DefaultBodyLimit::max(MAX_BLOB as usize)))
+        .route("/blob/{id}/offset", get(blob_offset))
         .route("/sealed", post(post_sealed).layer(DefaultBodyLimit::max(MAX_BODY * 2)));
     // Production: serve the built web app: landing page at /, app at /app/, hashed assets cached
     // forever, unknown paths a 404 with the landing page.
@@ -424,11 +434,20 @@ async fn sweep(app: Shared) {
                 eprintln!("sweep: {e}");
             }
         }
+        // Chat backups stay however long it's been: losing your phone is exactly when you need one.
+        let backups: std::collections::HashSet<String> = {
+            let db = app.db.lock().unwrap();
+            let mut st = db.prepare("SELECT backup FROM accounts WHERE backup IS NOT NULL").expect("query");
+            st.query_map([], |r| r.get(0)).and_then(|rows| rows.collect()).unwrap_or_default()
+        };
         if let Ok(dir) = std::fs::read_dir(&app.blobs) {
             let max_age = Duration::from_secs(BLOB_TTL_DAYS * 86_400);
             for f in dir.flatten() {
                 let old = f.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().unwrap_or_default() > max_age).unwrap_or(false);
-                if old {
+                let name = f.file_name().to_string_lossy().to_string();
+                // Abandoned resumable uploads go after two days.
+                let stale_part = name.ends_with(".part") && f.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(2 * 86_400)).unwrap_or(false);
+                if stale_part || (old && !backups.contains(&name)) {
                     let _ = std::fs::remove_file(f.path());
                 }
             }
@@ -504,6 +523,9 @@ struct SealedSend {
     /// A message worth a push notification (not a receipt or typing). See `wake`.
     #[serde(default)]
     urgent: bool,
+    /// An incoming call: the push rings (a ringtone, or a full-screen call screen on Android).
+    #[serde(default)]
+    call: bool,
 }
 
 /// Sealed delivery: no login and no sender. Gated by the recipient's access key, which they only
@@ -554,8 +576,8 @@ async fn post_sealed(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(
     };
     for (m, id) in msgs.iter().zip(&ids) {
         push(&app, &req.to, m.device, json!({"t": "msg", "id": id, "from": null, "sealed": true, "body": m.body, "ts": ts}));
-        if req.urgent {
-            wake(&app, &req.to, m.device);
+        if req.urgent || req.call {
+            wake(&app, &req.to, m.device, req.call);
         }
     }
     (StatusCode::CREATED, axum::Json(json!({"ts": ts}))).into_response()
@@ -660,9 +682,19 @@ fn blob_id_ok(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+#[derive(Deserialize)]
+struct PartQuery {
+    offset: Option<u64>,
+}
+
 /// Store an encrypted attachment. The id must come from an `upload` RPC (single use, 10 min).
+/// With `?offset=`, one part of a resumable upload (big files): parts must arrive in order, and the
+/// blob appears once the reserved size is reached.
 // Blobs expire after BLOB_TTL_DAYS (see `sweep`). ponytail: local disk; object storage when it outgrows one host.
-async fn put_blob(Path(id): Path<String>, State(app): State<Shared>, body: Body) -> StatusCode {
+async fn put_blob(Path(id): Path<String>, State(app): State<Shared>, axum::extract::Query(q): axum::extract::Query<PartQuery>, body: Body) -> StatusCode {
+    if let Some(offset) = q.offset {
+        return put_part(&app, &id, offset, body).await;
+    }
     let slot = app.uploads.lock().unwrap().remove(&id);
     let Some((max, _)) = slot.filter(|(_, e)| *e > Instant::now()) else { return StatusCode::FORBIDDEN };
     let part = app.blobs.join(format!("{id}.part"));
@@ -684,6 +716,61 @@ async fn put_blob(Path(id): Path<String>, State(app): State<Shared>, body: Body)
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
     StatusCode::CREATED
+}
+
+async fn put_part(app: &App, id: &str, offset: u64, body: Body) -> StatusCode {
+    if !blob_id_ok(id) {
+        return StatusCode::NOT_FOUND;
+    }
+    // The slot is taken out while a part is written, so two parts can't write at once.
+    let slot = app.uploads.lock().unwrap().remove(id);
+    let Some((size, expires)) = slot.filter(|(_, e)| *e > Instant::now()) else { return StatusCode::FORBIDDEN };
+    let put_back = |app: &App| app.uploads.lock().unwrap().insert(id.to_owned(), (size, expires));
+    let part = app.blobs.join(format!("{id}.part"));
+    let have = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
+    if offset != have {
+        put_back(app);
+        return StatusCode::CONFLICT; // the app asks /offset and carries on from there
+    }
+    let Ok(mut file) = tokio::fs::OpenOptions::new().create(true).append(true).open(&part).await else {
+        put_back(app);
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    };
+    let mut stream = body.into_data_stream();
+    let mut written = 0usize;
+    let mut ok = true;
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            ok = false;
+            break;
+        };
+        written += chunk.len();
+        if written > MAX_PART || have + written as u64 > size || file.write_all(&chunk).await.is_err() {
+            ok = false;
+            break;
+        }
+    }
+    if !ok || file.flush().await.is_err() {
+        // A part arrives whole or not at all, so the upload resumes on a part boundary.
+        let _ = file.set_len(have).await;
+        put_back(app);
+        return StatusCode::BAD_REQUEST;
+    }
+    if have + written as u64 == size {
+        return if tokio::fs::rename(&part, app.blobs.join(id)).await.is_ok() { StatusCode::CREATED } else { StatusCode::INTERNAL_SERVER_ERROR };
+    }
+    put_back(app);
+    StatusCode::ACCEPTED
+}
+
+/// How much of a resumable upload has arrived (404 once it's finished or the slot has expired).
+async fn blob_offset(Path(id): Path<String>, State(app): State<Shared>) -> Response {
+    let live = app.uploads.lock().unwrap().get(&id).is_some_and(|(_, e)| *e > Instant::now());
+    if !blob_id_ok(&id) || !live {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let have = tokio::fs::metadata(app.blobs.join(format!("{id}.part"))).await.map(|m| m.len()).unwrap_or(0);
+    axum::Json(json!({ "offset": have })).into_response()
 }
 
 /// Anyone with the id can fetch the ciphertext; without the key from the message it's useless.
@@ -1003,10 +1090,18 @@ enum Req {
         /// Worth a push notification (a message or a call, not a receipt or typing).
         #[serde(default)]
         urgent: bool,
+        /// An incoming call: the push rings.
+        #[serde(default)]
+        call: bool,
     },
     Ack { id: i64 },
     /// Reserve a one-time slot to upload an encrypted attachment of at most `size` bytes.
-    Upload { size: u64 },
+    Upload {
+        size: u64,
+        /// For a chat backup: only a slot reserved this way can become the account's backup.
+        #[serde(default)]
+        backup: bool,
+    },
     /// STUN/TURN servers for calls, with short-lived TURN credentials.
     Ice,
     /// Flag an account for abuse review.
@@ -1028,6 +1123,12 @@ enum Req {
     Push { kind: String, token: String },
     /// Phone apps: the app went to the background (or came back).
     Away { away: bool },
+    /// Chat backup: with `id` (main device), the uploaded blob that is now the backup; without,
+    /// which blob holds it. It's encrypted with a key from the recovery phrase: opaque to us.
+    Backup {
+        #[serde(default)]
+        id: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -1067,6 +1168,7 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
         Req::Ack { .. } => ("ack", 50.0, 2000.0),
         Req::Push { .. } => ("push", 0.2, 10.0),
         Req::Away { .. } => ("away", 1.0, 60.0),
+        Req::Backup { .. } => ("backup", 0.01, 10.0),
     };
     if !app.limits.allow(&format!("{bucket}:{me}"), rate, burst) {
         return json!({"rid": rpc.rid, "error": "slow_down"});
@@ -1091,12 +1193,12 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
         }
     }
     let mut out = match rpc.req {
-        Req::Send { to, msgs, body, urgent } => {
+        Req::Send { to, msgs, body, urgent, call } => {
             let msgs = match body {
                 Some(body) if msgs.is_empty() => vec![DeviceMsg { device: MAIN_DEVICE, body }],
                 _ => msgs,
             };
-            send_msg(app, cx, &to, &msgs, urgent)
+            send_msg(app, cx, &to, &msgs, urgent || call, call)
         }
         Req::Away { away } => {
             if let Some(c) = app.online.lock().unwrap().get_mut(&format!("{me}.{}", cx.device)) {
@@ -1312,8 +1414,8 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
             push_all(app, me, json!({"t": "devices"}));
             Ok(json!({}))
         }
-        Req::Upload { size } => {
-            if size == 0 || size > MAX_BLOB {
+        Req::Upload { size, backup } => {
+            if size == 0 || size > MAX_LARGE_BLOB {
                 return Err("too_large".into());
             }
             let day = now_ms() / 86_400_000;
@@ -1323,7 +1425,14 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
             let id: String = rand::random::<[u8; 16]>().iter().map(|b| format!("{b:02x}")).collect();
             let mut slots = app.uploads.lock().unwrap();
             slots.retain(|_, (_, e)| *e > Instant::now());
-            slots.insert(id.clone(), (size, Instant::now() + Duration::from_secs(600)));
+            // Big uploads go in resumable parts, which may take a while on a slow connection.
+            let life = if size > MAX_BLOB { 86_400 } else { 600 };
+            slots.insert(id.clone(), (size, Instant::now() + Duration::from_secs(life)));
+            if backup {
+                let mut b = app.backup_slots.lock().unwrap();
+                b.retain(|_, (_, e)| *e > Instant::now());
+                b.insert(id.clone(), (me.to_owned(), Instant::now() + Duration::from_secs(3600)));
+            }
             Ok(json!({"id": id}))
         }
         Req::Report { id } => {
@@ -1337,6 +1446,44 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
                 return Err("bad key".into());
             }
             db.execute("UPDATE accounts SET access=? WHERE id=?", params![key, me]).map_err(e)?;
+            Ok(json!({}))
+        }
+        Req::Backup { id: None } => {
+            let id: Option<String> = db.query_row("SELECT backup FROM accounts WHERE id=?", [me], |r| r.get(0)).map_err(e)?;
+            Ok(json!({ "id": id }))
+        }
+        Req::Backup { id: Some(id) } => {
+            if cx.device != MAIN_DEVICE || !has_main_key(db, me) {
+                return Err("main_only".into());
+            }
+            // Backups turned off: the copy goes too.
+            if id.is_empty() {
+                let old: Option<String> = db.query_row("SELECT backup FROM accounts WHERE id=?", [me], |r| r.get(0)).map_err(e)?;
+                db.execute("UPDATE accounts SET backup=NULL WHERE id=?", [me]).map_err(e)?;
+                if let Some(old) = old.filter(|o| blob_id_ok(o)) {
+                    let _ = std::fs::remove_file(app.blobs.join(old));
+                }
+                return Ok(json!({}));
+            }
+            // Only a backup upload this account reserved: never someone's attachment, which replacing
+            // the backup later would delete.
+            let ours = {
+                let mut slots = app.backup_slots.lock().unwrap();
+                let ok = slots.get(&id).is_some_and(|(owner, exp)| owner == me && *exp > Instant::now());
+                if ok {
+                    slots.remove(&id);
+                }
+                ok
+            };
+            if !ours || !blob_id_ok(&id) || !app.blobs.join(&id).is_file() {
+                return Err("no such upload".into());
+            }
+            let old: Option<String> = db.query_row("SELECT backup FROM accounts WHERE id=?", [me], |r| r.get(0)).map_err(e)?;
+            db.execute("UPDATE accounts SET backup=? WHERE id=?", params![id, me]).map_err(e)?;
+            // The previous backup is replaced, not kept.
+            if let Some(old) = old.filter(|o| *o != id && blob_id_ok(o)) {
+                let _ = std::fs::remove_file(app.blobs.join(old));
+            }
             Ok(json!({}))
         }
         Req::Push { kind, token } => {
@@ -1408,7 +1555,7 @@ fn queue_full(db: &Connection, to: &str) -> bool {
         .map_or(true, |(n, bytes)| n >= MAX_QUEUED_PER_RECIPIENT || bytes >= MAX_QUEUED_BYTES)
 }
 
-fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg], urgent: bool) -> Result<Value, String> {
+fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg], urgent: bool, call: bool) -> Result<Value, String> {
     if msgs.iter().any(|m| m.body.len() > MAX_BODY) {
         return Err("too_large".into());
     }
@@ -1441,7 +1588,7 @@ fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg], urgent: bool) -> 
     for (m, id) in msgs.iter().zip(&ids) {
         push(app, to, m.device, json!({"t": "msg", "id": id, "from": me, "dev": cx.device, "body": m.body, "ts": ts}));
         if urgent {
-            wake(app, to, m.device);
+            wake(app, to, m.device, call);
         }
     }
     Ok(json!({"ts": ts}))
@@ -1456,20 +1603,22 @@ fn push(app: &App, to: &str, device: u32, v: Value) {
 /// A message or call for a device that isn't looking (offline, or a phone app in the background):
 /// if it's a phone with push turned on, wake it. Senders mark what's urgent, so receipts and typing
 /// don't buzz anyone; at most one push every 30 seconds per device (each replaces the last anyway).
-fn wake(app: &App, to: &str, device: u32) {
+/// Calls always ring (their own, looser limit), whatever messages were pushed just before.
+fn wake(app: &App, to: &str, device: u32, call: bool) {
     let away = app.online.lock().unwrap().get(&format!("{to}.{device}")).is_none_or(|c| c.away);
-    if away && app.pusher.enabled() && app.limits.allow(&format!("wake:{to}.{device}"), 1.0 / 30.0, 2.0) {
-        let _ = app.wakes.send((to.to_owned(), device));
+    let allowed = if call { app.limits.allow(&format!("ring:{to}.{device}"), 1.0 / 10.0, 3.0) } else { app.limits.allow(&format!("wake:{to}.{device}"), 1.0 / 30.0, 2.0) };
+    if away && app.pusher.enabled() && allowed {
+        let _ = app.wakes.send((to.to_owned(), device, call));
     }
 }
 
-async fn wake_loop(app: Shared, mut rx: mpsc::UnboundedReceiver<(String, u32)>) {
-    while let Some((account, device)) = rx.recv().await {
+async fn wake_loop(app: Shared, mut rx: mpsc::UnboundedReceiver<(String, u32, bool)>) {
+    while let Some((account, device, call)) = rx.recv().await {
         let token = app.db.lock().unwrap().query_row("SELECT kind, token FROM push_tokens WHERE account=? AND device=?", params![account, device], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional().ok().flatten();
         let Some((kind, token)) = token else { continue };
         let app = app.clone();
         tokio::spawn(async move {
-            if app.pusher.wake(&kind, &token).await.is_err() {
+            if app.pusher.wake(&kind, &token, call).await.is_err() {
                 let _ = app.db.lock().unwrap().execute("DELETE FROM push_tokens WHERE kind=? AND token=?", params![kind, token]);
             }
         });

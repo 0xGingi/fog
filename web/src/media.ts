@@ -21,8 +21,14 @@ export type Att = {
   dur?: number
   thumb?: string
   wave?: number[]
+  /** Encrypted in chunks of this many bytes (big files; see `uploadChunked`). */
+  ch?: number
 }
-export const MAX_FILE = 100 * 1024 * 1024
+export const MAX_FILE = 2 * 1024 ** 3
+/** Files above this go up in encrypted 4 MB chunks, and resume if the connection drops. */
+const CHUNKED_ABOVE = 32 * 1024 * 1024
+const CHUNK = 4 * 1024 * 1024
+const TAG = 16
 
 const b64 = (u: Uint8Array) => {
   let s = ''
@@ -103,12 +109,90 @@ async function decrypt(data: Uint8Array<ArrayBuffer>, key: string) {
   return crypto.subtle.decrypt({ name: "AES-GCM", iv: data.subarray(0, 12) }, k, data.subarray(12))
 }
 
-// ponytail: whole-file encrypt/decrypt in memory (fine to 100 MB). Chunked streaming for bigger files later.
+/**
+ * Big files: the padded file is cut into 4 MB chunks, each sealed with AES-256-GCM under the file's
+ * key with its index as the nonce and an end-of-file marker as associated data. Reordered, swapped
+ * or cut-off chunks fail to decrypt. Only one chunk is in memory at a time on either end.
+ */
+const nonce = (i: number) => {
+  const n = new Uint8Array(12)
+  new DataView(n.buffer).setBigUint64(4, BigInt(i))
+  return n
+}
+const chunkLayout = (size: number) => {
+  const padded = padBucket(size)
+  const n = Math.max(1, Math.ceil(padded / CHUNK))
+  return { padded, n, total: padded + n * TAG }
+}
+
+/** Send one part of a resumable upload, with progress. */
+function putPart(id: string, offset: number, data: Uint8Array<ArrayBuffer>, progress: (sent: number) => void) {
+  return new Promise<void>((res, rej) => {
+    const x = new XMLHttpRequest()
+    x.open('PUT', `${SERVER.origin}/blob/${id}?offset=${offset}`)
+    x.upload.onprogress = (e) => progress(e.loaded)
+    x.onload = () => (x.status < 300 ? res() : rej(Object.assign(new Error(`upload ${x.status}`), { status: x.status })))
+    x.onerror = () => rej(new Error('upload failed'))
+    x.send(data)
+  })
+}
+/** How much of an upload the server has: null once the slot is gone (finished or expired),
+ *  undefined if the server couldn't be asked (still offline). */
+async function serverOffset(id: string): Promise<number | null | undefined> {
+  const r = await fetch(`${SERVER.origin}/blob/${id}/offset`).catch(() => undefined)
+  if (!r) return undefined
+  return r.ok ? ((await r.json()).offset as number) : r.status === 404 ? null : undefined
+}
+
+async function uploadChunked(att: Att, blob: Blob, reserve: (size: number) => Promise<string>): Promise<Att> {
+  const { padded, n, total } = chunkLayout(blob.size)
+  // Where an earlier attempt got to (the app may have been closed mid-upload): carry on from there.
+  let st = await kv<{ id: string; key: string }>(`up:${att.lid}`)
+  let offset = st ? await serverOffset(st.id) : null
+  if (offset === undefined) throw new Error('offline') // try again later, from the same place
+  if (!st || offset === null) {
+    st = { id: await reserve(total), key: b64(crypto.getRandomValues(new Uint8Array(32))) }
+    await kv(`up:${att.lid}`, st)
+    offset = 0
+  }
+  const k = await crypto.subtle.importKey('raw', unb64(st.key), 'AES-GCM', false, ['encrypt'])
+  const span = CHUNK + TAG
+  let fails = 0
+  for (let i = Math.floor(offset / span); i < n; ) {
+    const start = i * CHUNK
+    const end = Math.min(padded, start + CHUNK)
+    // Past the end of the file is the size padding: zeros.
+    const plain = new Uint8Array(end - start)
+    if (start < blob.size) plain.set(new Uint8Array(await blob.slice(start, Math.min(end, blob.size)).arrayBuffer()))
+    const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce(i), additionalData: new Uint8Array([i === n - 1 ? 1 : 0]) }, k, plain))
+    try {
+      await putPart(st.id, i * span, sealed, (sent) => setT(att.lid, { p: (i * span + sent) / total, dir: 'up' }))
+      i++
+      fails = 0
+    } catch (e) {
+      // Dropped connection: wait, ask the server where it got to, and resume. Give up after a while
+      // (the message shows "failed"; retrying it resumes from the same place).
+      if (++fails > 6) throw e
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** fails))
+      const at = await serverOffset(st.id)
+      if (at === null) throw e // the upload is gone (expired): start over next time
+      if (at !== undefined) i = Math.floor(at / span)
+    }
+  }
+  await kv(`up:${att.lid}`, null)
+  return { ...att, id: st.id, key: st.key, ch: CHUNK }
+}
+
 export async function upload(att: Att, reserve: (size: number) => Promise<string>): Promise<Att> {
   const blob = await localBlob(att.lid)
   if (!blob) throw new Error('missing local file')
   setT(att.lid, { p: 0, dir: 'up' })
   try {
+    if (blob.size > CHUNKED_ABOVE) {
+      const done = await uploadChunked(att, blob, reserve)
+      setT(att.lid, null)
+      return done
+    }
     const { out, key } = await encrypt(await blob.arrayBuffer())
     const id = await reserve(out.length)
     await new Promise<void>((res, rej) => {
@@ -139,6 +223,11 @@ export function download(att: Att): Promise<string | null> {
     try {
       const r = await fetch(`${SERVER.origin}/blob/${att.id}`)
       if (!r.ok || !r.body) throw new Error(`download ${r.status}`)
+      if (att.ch) {
+        await storeLocal(att.lid, await decryptChunked(r.body, att))
+        setT(att.lid, null)
+        return localUrl(att.lid)
+      }
       const total = Number(r.headers.get('content-length')) || att.size || 1
       const reader = r.body.getReader()
       const parts: Uint8Array[] = []
@@ -168,6 +257,58 @@ export function download(att: Att): Promise<string | null> {
   })()
   inflight.set(att.lid, p)
   return p
+}
+
+/** Decrypt a chunked attachment as it streams in, one chunk at a time. */
+async function decryptChunked(body: ReadableStream<Uint8Array>, att: Att): Promise<Blob> {
+  const ch = att.ch!
+  if (ch !== CHUNK) throw new Error('unknown chunk size')
+  const { padded, n, total } = chunkLayout(att.size)
+  const k = await crypto.subtle.importKey('raw', unb64(att.key!), 'AES-GCM', false, ['decrypt'])
+  const reader = body.getReader()
+  const parts: BlobPart[] = []
+  let pending: Uint8Array[] = []
+  let pendingLen = 0
+  let got = 0
+  let i = 0
+  let kept = 0 // plaintext bytes kept so far (padding beyond att.size is dropped)
+  const take = (len: number) => {
+    const out = new Uint8Array(len)
+    let o = 0
+    while (o < len) {
+      const head = pending[0]
+      const use = Math.min(head.length, len - o)
+      out.set(head.subarray(0, use), o)
+      o += use
+      if (use === head.length) pending.shift()
+      else pending[0] = head.subarray(use)
+    }
+    pendingLen -= len
+    return out
+  }
+  const chunkLen = (j: number) => (j < n - 1 ? CHUNK : padded - (n - 1) * CHUNK) + TAG
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (value) {
+      pending.push(value)
+      pendingLen += value.length
+      got += value.length
+      setT(att.lid, { p: Math.min(1, got / total), dir: 'down' })
+    }
+    while (i < n && pendingLen >= chunkLen(i)) {
+      const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce(i), additionalData: new Uint8Array([i === n - 1 ? 1 : 0]) }, k, take(chunkLen(i))))
+      const keep = Math.min(plain.length, att.size - kept)
+      if (keep > 0) parts.push(keep === plain.length ? plain : plain.slice(0, keep))
+      kept += Math.max(0, keep)
+      i++
+      // Fold finished chunks into a Blob now and then, so the browser can keep them out of memory.
+      if (parts.length >= 16) parts.splice(0, parts.length, new Blob(parts))
+    }
+    if (done) break
+  }
+  // Every chunk, ending with the one sealed as last: anything shorter was cut off.
+  if (i !== n || pendingLen) throw new Error('truncated')
+  return new Blob(parts, { type: safeType(att.mime) })
 }
 
 /** Hand the file to the browser's downloads. Always as opaque bytes, never opened in a tab. */
@@ -221,13 +362,60 @@ function mediaMeta(url: string, video: boolean) {
   })
 }
 
-async function videoPoster(v: HTMLVideoElement, dur: number) {
-  await new Promise<void>((res) => {
-    v.onseeked = () => res()
-    v.currentTime = Math.min(0.5, dur / 2)
-    setTimeout(res, 3000)
+/** Mostly black (a frame that hasn't been decoded yet, or a fade-in)? */
+export function blank(src: CanvasImageSource, w: number, h: number) {
+  const c = document.createElement('canvas')
+  c.width = c.height = 16
+  const g = c.getContext('2d', { willReadFrequently: true })!
+  g.drawImage(src, 0, 0, w, h, 0, 0, 16, 16)
+  const d = g.getImageData(0, 0, 16, 16).data
+  let sum = 0
+  for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2]
+  return sum / (d.length / 4) / 3 < 10
+}
+const seekTo = (v: HTMLVideoElement, t: number) =>
+  new Promise<void>((res) => {
+    const done = () => res()
+    v.addEventListener('seeked', done, { once: true })
+    v.currentTime = t
+    setTimeout(done, 2500)
   })
-  return toDataUrl(v, v.videoWidth, v.videoHeight, 360, 0.7)
+
+/**
+ * A still for the chat bubble. WebKit (iPhones, Safari) only decodes frames once real data has
+ * loaded and the video has played, so load it fully, play it muted for a moment, then pick the
+ * first frame that isn't black (skipping fade-ins). Null if every try is black.
+ */
+/** A still from a video that's playing right now (for videos whose thumbnail came out black). */
+export async function posterNow(v: HTMLVideoElement) {
+  return v.videoWidth && !blank(v, v.videoWidth, v.videoHeight) ? toDataUrl(v, v.videoWidth, v.videoHeight, 360, 0.7) : undefined
+}
+/** Is this thumbnail (a data URL) missing or black? */
+export async function thumbIsBlank(thumb?: string) {
+  if (!thumb) return true
+  const img = new Image()
+  img.src = thumb
+  await img.decode().catch(() => {})
+  return !img.naturalWidth || blank(img, img.naturalWidth, img.naturalHeight)
+}
+
+export async function videoPoster(v: HTMLVideoElement, dur: number): Promise<string | undefined> {
+  v.muted = true
+  v.playsInline = true
+  v.preload = 'auto'
+  if (v.readyState < 2)
+    await new Promise<void>((res) => {
+      v.addEventListener('loadeddata', () => res(), { once: true })
+      v.load()
+      setTimeout(res, 4000)
+    })
+  await v.play().then(() => v.pause(), () => {})
+  for (const t of [Math.min(0.5, dur / 2), dur * 0.1, dur * 0.25, dur * 0.5]) {
+    await seekTo(v, t)
+    await new Promise((r) => setTimeout(r, 60))
+    if (v.videoWidth && !blank(v, v.videoWidth, v.videoHeight)) return toDataUrl(v, v.videoWidth, v.videoHeight, 360, 0.7)
+  }
+  return undefined
 }
 
 /**
@@ -293,11 +481,36 @@ export async function avatarFrom(file: Blob): Promise<string> {
 }
 
 /** Stickers: up to 512px WebP, transparency kept (PNG where WebP encoding isn't available). */
+/** Animated GIF, animated WebP or APNG? (Read from the file's first bytes.) */
+async function isAnimated(file: Blob) {
+  const b = new Uint8Array(await file.slice(0, 64 * 1024).arrayBuffer())
+  const at = (s: string, o: number) => [...s].every((c, i) => b[o + i] === c.charCodeAt(0))
+  if (at('GIF8', 0)) return true // treated as animated: re-encoding would lose any frames anyway
+  if (at('RIFF', 0) && at('WEBP', 8) && at('VP8X', 12)) return (b[20] & 0x02) !== 0
+  if (b[0] === 0x89 && at('PNG', 1)) {
+    for (let i = 8; i + 8 < b.length; ) {
+      const len = new DataView(b.buffer, i, 4).getUint32(0)
+      if (at('acTL', i + 4)) return true
+      if (at('IDAT', i + 4)) return false
+      i += 12 + len
+    }
+  }
+  return false
+}
+export const MAX_ANIMATED_STICKER = 2 * 1024 * 1024
+
 export async function prepareSticker(file: Blob): Promise<Att> {
   const bmp = await createImageBitmap(file)
   const s = Math.min(1, 512 / Math.max(bmp.width, bmp.height))
   const w = Math.round(bmp.width * s)
   const h = Math.round(bmp.height * s)
+  // Animated stickers are kept as they are (shrinking them would mean re-encoding every frame).
+  if (await isAnimated(file)) {
+    if (file.size > MAX_ANIMATED_STICKER) throw new Error('animated_too_large')
+    const lid = crypto.randomUUID()
+    await storeLocal(lid, file)
+    return { lid, kind: 'sticker', mime: file.type || 'image/gif', name: 'sticker', size: file.size, w, h }
+  }
   const c = new OffscreenCanvas(w, h)
   c.getContext('2d')!.drawImage(bmp, 0, 0, w, h)
   let blob = await c.convertToBlob({ type: 'image/webp', quality: 0.9 })

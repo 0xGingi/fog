@@ -372,7 +372,7 @@ function RestoreStep({ onBack }: { onBack: () => void }) {
       <Back onClick={onBack} />
       <h1 className="text-2xl font-bold">Restore your account</h1>
       <p className="mt-2 text-muted">
-        Enter your 24-word recovery phrase. This becomes your main device: messages on your old one stay there, and any linked devices are signed out. To add a device instead, use{' '}
+        Enter your 24-word recovery phrase. This becomes your main device, any linked devices are signed out, and your chats come back from your latest backup if backups were on. To add a device instead, use{' '}
         <span className="font-medium text-ink">Link to an existing account</span>.
       </p>
       <textarea
@@ -699,12 +699,13 @@ function Sidebar({
   const list = sortedChats(chats).filter((c) => !c.request && (q ? chatTitle(c, people[c.id]).toLowerCase().includes(q) || people[c.id]?.username?.includes(q) : !c.archived))
   const archived = Object.values(chats).filter((c) => c.archived && !c.request)
   const requests = Object.values(chats).filter((c) => c.request)
-  const hits = useMemo(() => {
-    if (q.length < 2) return []
+  const [hits, more] = useMemo(() => {
+    if (q.length < 2) return [[], 0]
+    const terms = fog.searchTerms(q)
     const out: { chat: Chat; m: Msg }[] = []
-    for (const c of Object.values(chats))
-      for (const m of c.messages) if (!m.sys && (m.text.toLowerCase().includes(q) || m.att?.name.toLowerCase().includes(q))) out.push({ chat: c, m })
-    return out.sort((a, b) => b.m.ts - a.m.ts).slice(0, 50)
+    for (const c of Object.values(chats)) for (const m of c.messages) if (fog.msgMatches(m, terms)) out.push({ chat: c, m })
+    out.sort((a, b) => b.m.ts - a.m.ts)
+    return [out.slice(0, 100), Math.max(0, out.length - 100)]
   }, [chats, q])
 
   // Folded: an avatar rail (unread badges stay visible), like Telegram's narrow sidebar.
@@ -829,13 +830,14 @@ function Sidebar({
                   </div>
                   <p className="truncate text-[15px] text-muted">
                     {m.mine ? 'You: ' : chat.group ? `${personName(m.from ?? '', people[m.from ?? ''])}: ` : ''}
-                    <Highlight text={m.text || m.att?.name || ''} q={q} />
+                    <Highlight text={m.text || m.poll?.q || m.link?.title || m.att?.name || ''} q={q} />
                   </p>
                 </div>
               </button>
             ))}
           </>
         )}
+        {more > 0 && <p className="px-3 pt-2 pb-4 text-center text-sm text-muted">{more} older {more === 1 ? 'match' : 'matches'}. Add another word to narrow it down.</p>}
         {q && !list.length && !hits.length && <p className="px-6 pt-12 text-center text-muted">No chats or messages match “{filter}”.</p>}
         {!q && !list.length && !archived.length && !requests.length && (
           <div className="px-6 pt-16 text-center">
@@ -862,16 +864,21 @@ function Sidebar({
   )
 }
 
+/** The text around the first search word, with that word marked (accents ignored, as in the search). */
 function Highlight({ text, q }: { text: string; q: string }) {
-  const i = text.toLowerCase().indexOf(q)
-  if (i < 0) return <>{text}</>
+  // Fold character by character so positions line up with the original text.
+  const folded = [...text].map((c) => fog.fold(c)[0] ?? c).join('')
+  const word = fog.searchTerms(q).find((t) => folded.includes(t))
+  const i = word ? folded.indexOf(word) : -1
+  if (!word || i < 0) return <>{text}</>
+  const chars = [...text]
   const start = Math.max(0, i - 24)
   return (
     <>
       {start > 0 && '…'}
-      {text.slice(start, i)}
-      <mark className="rounded bg-lamp/35 px-0.5 text-ink">{text.slice(i, i + q.length)}</mark>
-      {text.slice(i + q.length)}
+      {chars.slice(start, i).join('')}
+      <mark className="rounded bg-lamp/35 px-0.5 text-ink">{chars.slice(i, i + word.length).join('')}</mark>
+      {chars.slice(i + word.length).join('')}
     </>
   )
 }
@@ -1143,6 +1150,7 @@ function Settings({ onClose }: { onClose: () => void }) {
   const [lockOn, setLockOn] = useState(false)
   useEffect(() => void db.lockEnabled().then(setLockOn), [dialog])
   const blocked = useFog((s) => s.blocked)
+  const backup = useFog((s) => s.backup)
   const file = useRef<HTMLInputElement>(null)
   const saveName = () => name.trim() !== profile.name && fog.setProfile({ name: name.trim() })
   const display = profile.name || (me.username ? `@${me.username}` : 'You')
@@ -1293,6 +1301,33 @@ function Settings({ onClose }: { onClose: () => void }) {
         />
       </Section>
 
+      <Section title="Chat backup">
+        {me.main ? (
+          <>
+            <Row
+              icon="archive"
+              title="Back up chats"
+              sub={
+                settings.backup === false
+                  ? 'Off. Losing this device means losing your chats.'
+                  : backup.busy
+                    ? 'Backing up…'
+                    : backup.at
+                      ? `Last backup ${new Date(backup.at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`
+                      : 'Daily, encrypted with your recovery phrase'
+              }
+              right={<Toggle label="Back up chats" on={settings.backup !== false} onChange={(v) => fog.updateSettings({ backup: v })} />}
+            />
+            {settings.backup !== false && <Row icon="upload" title="Back up now" onClick={() => void fog.backupNow(true)} />}
+            <p className="px-3 pt-1 text-sm text-muted">
+              Your messages, contacts and groups, encrypted on this device with a key from your recovery phrase. The server keeps only the latest copy and can't read it. Restore your account with the phrase on a new phone and your chats come back. Photos and files come back for as long as the server keeps them (45 days).
+            </p>
+          </>
+        ) : (
+          <p className="px-3 text-sm text-muted">Backups are made by your main device, the one with your recovery phrase.</p>
+        )}
+      </Section>
+
       {me.main ? (
       <Section title="Recovery phrase">
         <p className="px-3 text-sm text-muted">The only way back into your account on a new device. Never share it.</p>
@@ -1312,6 +1347,10 @@ function Settings({ onClose }: { onClose: () => void }) {
           <p className="px-3 text-sm text-muted">Your recovery phrase is on your main device. Linked devices never receive it.</p>
         </Section>
       )}
+
+      <Section title="Help">
+        <Row icon="info" title="Fog guide" sub="Tips and answers, in a chat on this device" onClick={() => (onClose(), fog.openGuide())} />
+      </Section>
 
       <div className="mt-6">
         <Row icon="out" title={<span className="text-danger">Log out</span>} onClick={() => setDialog('logout')} />
@@ -1926,7 +1965,7 @@ function ChatInfo({ id, onClose }: { id: string; onClose: () => void }) {
   const title = chatTitle(chat, person)
   const media = chat.messages.filter((m) => m.att && (m.att.kind === 'photo' || m.att.kind === 'video')).reverse()
   const docs = chat.messages.filter((m) => m.att && (m.att.kind === 'file' || m.att.kind === 'audio')).reverse()
-  const saved = id === SAVED
+  const saved = fog.isLocalChat(id)
   const sn = g || saved ? [] : (fog.safetyNumber(id).match(/.{5}/g) ?? [])
   return (
     <Drawer title={g ? 'Group info' : 'Info'} onClose={onClose} side="right">

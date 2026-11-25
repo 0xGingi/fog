@@ -63,6 +63,7 @@ const paths: Record<string, string> = {
   play: 'M8 5.5v13l11-6.5z',
   pause: 'M8 5v14M16 5v14',
   expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+  upload: 'M12 16V4M7 9l5-5 5 5M5 20h14',
 }
 export function Icon({ name, className = 'size-6' }: { name: string; className?: string }) {
   return (
