@@ -117,6 +117,8 @@ bunx tauri android build --apk     # needs Java 17, the Android SDK and NDK (NDK
 bunx tauri ios build               # needs Xcode
 ```
 
+**App icons.** The iPhone icon must be a full square with no transparency (iOS rounds the corners itself), so it comes from [`icons/ios-icon.svg`](web/src-tauri/icons/ios-icon.svg) rather than the rounded `public/icon.svg`. After running `tauri icon`, regenerate the iOS set from that file and save the PNGs without an alpha channel, or App Store uploads are rejected.
+
 **Notifications** come through Apple's and Google's push services when the server is configured for them (see [Push notifications](#push-notifications)). A push says only "New message"; open Fog to see what it is. Android needs Google Play services for push; without them Fog notifies only while it's open.
 
 **Updates.** iPhones update through TestFlight. The Android app checks the latest release at launch and offers to download and install a newer APK; Android installs it only if it's signed with the same key as the installed app.
