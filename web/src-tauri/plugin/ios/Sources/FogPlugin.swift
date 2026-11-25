@@ -13,6 +13,7 @@ class FogPlugin: Plugin {
   override func load(webview: WKWebView) {
     FogPlugin.makeRingtone()
     FogPlugin.hideKeyboardToolbar(webview)
+    FogPlugin.reloadIfKilled(webview)
     fitAboveKeyboard(webview)
     // Opening Fog clears its "New message" notifications.
     NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
@@ -42,8 +43,12 @@ class FogPlugin: Plugin {
     }
     NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillChangeFrameNotification, object: nil, queue: .main) { [weak webview] note in
       guard let webview, let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else { return }
+      // Only our own keyboard. System sheets that run in another process (the photo picker, for one)
+      // are reported like a keyboard covering the whole screen, which would squeeze Fog to nothing.
+      if (note.userInfo?[UIResponder.keyboardIsLocalUserInfoKey] as? Bool) == false { return }
       let keyboard = webview.convert(end, from: nil)
       let covered = Int(max(0, webview.bounds.maxY - keyboard.minY).rounded())
+      if CGFloat(covered) > webview.bounds.height * 0.7 { return } // no real keyboard is that tall
       let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
       webview.evaluateJavaScript("window.__fogKeyboard?.(\(covered), \(duration))")
     }
@@ -84,6 +89,15 @@ class FogPlugin: Plugin {
     pcm.withUnsafeBytes { data.append(contentsOf: $0) }
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     try? data.write(to: file)
+  }
+
+  /// iOS can end the web view's process (usually for memory, e.g. decoding a huge photo), which
+  /// leaves a blank screen. Reload instead: everything is saved on the device, so Fog comes back
+  /// where it was. (Tauri owns the navigation delegate, so the callback is added to its class.)
+  static func reloadIfKilled(_ webview: WKWebView) {
+    guard let delegate = webview.navigationDelegate else { return }
+    let reload: @convention(block) (AnyObject, WKWebView) -> Void = { _, view in view.reload() }
+    class_addMethod(type(of: delegate), #selector(WKNavigationDelegate.webViewWebContentProcessDidTerminate(_:)), imp_implementationWithBlock(reload), "v@:@")
   }
 
   /// Web views put a form toolbar (up / down / done) above the keyboard. A chat app doesn't want it:

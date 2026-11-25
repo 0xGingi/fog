@@ -46,6 +46,8 @@ if (native && navigator.maxTouchPoints > 1 && /iPhone|iPad|Macintosh/.test(navig
     root.style.setProperty('--keyboard', `${h}px`)
   }
   ;(window as unknown as { __fogKeyboard: (h: number, s: number) => void }).__fogKeyboard = (h, seconds) => {
+    // Never trust a "keyboard" taller than most of the screen (iOS reports some system sheets so).
+    if (h > innerHeight * 0.7) return
     // iOS often reports the keyboard twice as it opens (with and without the suggestion row).
     if (h === target) return
     target = h
