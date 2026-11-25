@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler build-essential libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.100.0
@@ -41,6 +41,12 @@ jobs:
       - name: Build web app
         working-directory: web
         run: bun install --frozen-lockfile && bun run build
+
+      # The desktop app on a non-macOS target, so platform-specific code can't break the next release.
+      - name: Desktop app compiles (Linux)
+        run: |
+          cd web && bun run build:desktop
+          cd src-tauri && cargo check --release --locked
 
       - name: End-to-end protocol test
         run: |

@@ -8,7 +8,7 @@ use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Manager, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
@@ -46,10 +46,11 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building Fog")
-        .run(|app, event| {
-            // macOS: clicking the Dock icon brings the window back.
-            if let RunEvent::Reopen { .. } = event {
-                show(app);
+        .run(|_app, _event| {
+            // macOS: clicking the Dock icon brings the window back. (Reopen exists only on macOS.)
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show(_app);
             }
         });
 }
