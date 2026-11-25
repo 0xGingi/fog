@@ -77,7 +77,7 @@ indexedDB
   })
   .catch(() => {})
 
-// Highlight the download for this device. (iPhone: TestFlight, linked once it's public.)
+// Highlight the download for this device.
 const ua = navigator.userAgent
 const touchMac = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1 // iPadOS reports itself as a Mac
 const os = /Android/.test(ua) ? 'android' : /iPhone|iPad/.test(ua) || touchMac ? 'ios' : /Mac/.test(ua) ? 'mac' : /Win/.test(ua) ? 'windows' : /Linux|X11/.test(ua) ? (/aarch64|arm64|armv8/i.test(ua) ? 'linux-arm64' : 'linux-x64') : null

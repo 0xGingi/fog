@@ -14,6 +14,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.util.Log
 import android.webkit.WebView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -25,6 +26,7 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
+import com.google.firebase.messaging.FirebaseMessagingService
 import org.json.JSONObject
 import java.net.URL
 import kotlin.concurrent.thread
@@ -53,8 +55,19 @@ class FogPlugin(private val activity: Activity) : Plugin(activity) {
         }
         // Built without google-services.json: no push, Fog notifies only while it's open.
         if (FirebaseApp.getApps(activity).isEmpty()) return invoke.reject("push isn't set up in this build")
-        FirebaseMessaging.getInstance().token.addOnCompleteListener { t ->
-            if (t.isSuccessful) invoke.resolve(JSObject().apply { put("token", t.result) }) else invoke.reject(t.exception?.message ?: "no push token")
+        // Firebase hands the token to FogMessagingService (below). The last one is kept, so later
+        // launches answer at once while register() refreshes it in the background.
+        val saved = activity.getSharedPreferences("fog", Context.MODE_PRIVATE).getString("push", null)
+        if (saved != null) invoke.resolve(JSObject().apply { put("token", saved) }) else synchronized(waiting) { waiting += invoke }
+        FirebaseMessaging.getInstance().register().addOnFailureListener { e -> answer { it.reject(e.message ?: "no push token") } }
+    }
+
+    companion object {
+        private val waiting = mutableListOf<Invoke>()
+
+        fun answer(reply: (Invoke) -> Unit) = synchronized(waiting) {
+            waiting.forEach(reply)
+            waiting.clear()
         }
     }
 
@@ -101,6 +114,15 @@ class FogPlugin(private val activity: Activity) : Plugin(activity) {
             }
         }
         ContextCompat.registerReceiver(activity, done, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), ContextCompat.RECEIVER_EXPORTED)
+    }
+}
+
+/** Receives this install's push token from Firebase (and any later replacement). */
+class FogMessagingService : FirebaseMessagingService() {
+    override fun onRegistered(token: String) {
+        Log.i("Fog", "push registration ready")
+        getSharedPreferences("fog", Context.MODE_PRIVATE).edit().putString("push", token).apply()
+        FogPlugin.answer { it.resolve(JSObject().apply { put("token", token) }) }
     }
 }
 

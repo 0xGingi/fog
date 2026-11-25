@@ -13,6 +13,10 @@ export type Call = {
   muted: boolean
   camOff: boolean
   sharing?: boolean
+  /** Our screen capture while sharing (shown in our own preview instead of the camera). */
+  screen?: MediaStream
+  /** The other side is sharing their screen. */
+  peerSharing?: boolean
   local?: MediaStream
   remote?: MediaStream
   ended?: string
@@ -138,6 +142,9 @@ export function toggleCam() {
   patch({ camOff })
 }
 
+/** Tell the other side, so they show the screen whole (fitted, zoomable) rather than cropped like a face. */
+const sharing = (on: boolean) => call && fog.sendSignal(call.peer, { id: call.id, k: 'screen', on, to: call.dev }).catch(() => {})
+
 /** Swap the outgoing camera track for a screen capture (and back). Video calls only. */
 let screenTrack: MediaStreamTrack | null = null
 export async function toggleScreen() {
@@ -149,7 +156,8 @@ export async function toggleScreen() {
     screenTrack.stop()
     screenTrack = null
     await sender.replaceTrack(cam)
-    return patch({ sharing: false })
+    sharing(false)
+    return patch({ sharing: false, screen: undefined })
   }
   try {
     const display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
@@ -157,7 +165,8 @@ export async function toggleScreen() {
     await sender.replaceTrack(screenTrack)
     // The browser's own "Stop sharing" button ends the track: switch back to the camera.
     screenTrack.onended = () => screenTrack && toggleScreen()
-    patch({ sharing: true })
+    sharing(true)
+    patch({ sharing: true, screen: display })
   } catch {
     // Picker cancelled.
   }
@@ -218,6 +227,7 @@ fog.setCallHandler((from, dev, p) => {
     patch({ phase: 'connecting', dev })
     pc?.setRemoteDescription({ type: 'answer', sdp: p.sdp }).catch(() => finish("Couldn't connect"))
   }
+  if (p.k === 'screen') patch({ peerSharing: p.on === true })
   if (p.k === 'end') finish(call.started ? 'Call ended' : call.out ? 'Call ended' : 'Missed')
   if (p.k === 'decline') finish('Declined')
   if (p.k === 'busy') finish('Busy on another call')

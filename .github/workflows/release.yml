@@ -231,7 +231,7 @@ jobs:
   ios:
     name: iOS (TestFlight)
     needs: core
-    runs-on: macos-26
+    runs-on: xcode-27 # the only image with Xcode 27 (iOS 27 SDK) so far
     env:
       HAS_IOS: ${{ secrets.IOS_CERTIFICATE != '' && secrets.IOS_MOBILE_PROVISION != '' && secrets.APPSTORE_API_KEY != '' }}
     defaults:

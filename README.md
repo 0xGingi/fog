@@ -107,7 +107,7 @@ Windows builds are unsigned for now, so SmartScreen warns on first run until a c
 
 ## Mobile Apps
 
-The same client also builds for **Android** (an APK attached to every release as `Fog-Android.apk`) and **iOS** (uploaded to TestFlight), from [`web/src-tauri`](web/src-tauri) with Tauri 2. The phone apps use their own bundle ID, `org.getfog.app`.
+The same client also builds for **Android** (an APK attached to every release as `Fog-Android.apk`) and **iOS** (uploaded to TestFlight; [join the public beta](https://testflight.apple.com/join/A5GN8ENf)), from [`web/src-tauri`](web/src-tauri) with Tauri 2. The phone apps use their own bundle ID, `org.getfog.app`.
 
 **Build locally:**
 

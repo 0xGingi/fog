@@ -60,6 +60,9 @@ const paths: Record<string, string> = {
   plus: 'M12 5v14M5 12h14',
   file: 'M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8zM14 3v5h5',
   volume: 'M5 10v4h3l4 4V6L8 10zM16 9a4 4 0 010 6M18.5 6.5a8 8 0 010 11',
+  play: 'M8 5.5v13l11-6.5z',
+  pause: 'M8 5v14M16 5v14',
+  expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
 }
 export function Icon({ name, className = 'size-6' }: { name: string; className?: string }) {
   return (
@@ -372,3 +375,135 @@ export const Section = ({ title, children }: { title: string; children: ReactNod
     {children}
   </section>
 )
+
+/**
+ * Pinch, pan and double-tap zoom for a photo, a video or a shared screen (wheel and double-click on
+ * desktop). At normal size, a swipe left/right or down is reported instead (next photo, close). A
+ * single tap is reported after a short wait, so it can't be the first half of a double tap.
+ */
+export function Zoomable({ children, onTap, onSwipe, reset, className = '' }: { children: ReactNode; onTap?: () => void; onSwipe?: (dir: 'left' | 'right' | 'down') => void; reset?: unknown; className?: string }) {
+  const box = useRef<HTMLDivElement>(null)
+  const inner = useRef<HTMLDivElement>(null)
+  const z = useRef({ s: 1, x: 0, y: 0 })
+  const g = useRef<{ pts: Map<number, { x: number; y: number }>; start?: { s: number; x: number; y: number; d: number; mx: number; my: number; px: number; py: number; t: number }; moved: boolean; lastTap: { t: number; x: number; y: number }; tapTimer: number }>({ pts: new Map(), moved: false, lastTap: { t: 0, x: 0, y: 0 }, tapTimer: 0 })
+  const apply = (animate = false) => {
+    const el = inner.current
+    if (!el) return
+    el.style.transition = animate ? 'transform 0.22s cubic-bezier(0.2, 0.9, 0.3, 1)' : 'none'
+    el.style.transform = `translate(${z.current.x}px, ${z.current.y}px) scale(${z.current.s})`
+  }
+  // Keep the zoomed content covering the frame (no panning off into empty space).
+  const clamp = (s: number, x: number, y: number) => {
+    const r = box.current!.getBoundingClientRect()
+    const mx = ((s - 1) * r.width) / 2
+    const my = ((s - 1) * r.height) / 2
+    return { s, x: Math.max(-mx, Math.min(mx, x)), y: Math.max(-my, Math.min(my, y)) }
+  }
+  const zoomAt = (s: number, cx: number, cy: number, animate = true) => {
+    const r = box.current!.getBoundingClientRect()
+    const ns = Math.max(1, Math.min(6, s))
+    // Keep the point under the finger/cursor where it is.
+    const px = (cx - r.left - r.width / 2 - z.current.x) / z.current.s
+    const py = (cy - r.top - r.height / 2 - z.current.y) / z.current.s
+    z.current = clamp(ns, cx - r.left - r.width / 2 - px * ns, cy - r.top - r.height / 2 - py * ns)
+    apply(animate)
+  }
+  useEffect(() => {
+    z.current = { s: 1, x: 0, y: 0 }
+    apply()
+  }, [reset])
+  useEffect(() => () => clearTimeout(g.current.tapTimer), [])
+  // React's wheel listener is passive, so it can't stop the page from scrolling: attach our own.
+  useEffect(() => {
+    const el = box.current!
+    const wheel = (e: WheelEvent) => {
+      e.preventDefault()
+      zoomAt(z.current.s * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.002)), e.clientX, e.clientY, false)
+    }
+    el.addEventListener('wheel', wheel, { passive: false })
+    return () => el.removeEventListener('wheel', wheel)
+  }, [])
+
+  const begin = () => {
+    const pts = [...g.current.pts.values()]
+    const [a, b = a] = pts
+    g.current.start = { ...z.current, d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, px: a.x, py: a.y, t: Date.now() }
+  }
+  return (
+    <div
+      ref={box}
+      className={`touch-none overflow-hidden select-none ${className}`}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return
+        e.currentTarget.setPointerCapture(e.pointerId)
+        g.current.pts.set(e.pointerId, { x: e.clientX, y: e.clientY })
+        if (g.current.pts.size === 1) g.current.moved = false
+        begin()
+      }}
+      onPointerMove={(e) => {
+        const st = g.current.start
+        if (!g.current.pts.has(e.pointerId) || !st) return
+        g.current.pts.set(e.pointerId, { x: e.clientX, y: e.clientY })
+        const pts = [...g.current.pts.values()]
+        if (pts.length >= 2) {
+          g.current.moved = true
+          const [a, b] = pts
+          const r = box.current!.getBoundingClientRect()
+          const s = Math.max(1, Math.min(6, (st.s * Math.hypot(a.x - b.x, a.y - b.y)) / st.d))
+          const mx = (a.x + b.x) / 2 - r.left - r.width / 2
+          const my = (a.y + b.y) / 2 - r.top - r.height / 2
+          const px = (st.mx - r.left - r.width / 2 - st.x) / st.s
+          const py = (st.my - r.top - r.height / 2 - st.y) / st.s
+          z.current = clamp(s, mx - px * s, my - py * s)
+          return apply()
+        }
+        const dx = e.clientX - st.px
+        const dy = e.clientY - st.py
+        if (Math.abs(dx) > 8 || Math.abs(dy) > 8) g.current.moved = true
+        if (!g.current.moved) return
+        if (st.s > 1) z.current = clamp(st.s, st.x + dx, st.y + dy)
+        // At normal size the content follows a swipe, then springs back or is swiped away.
+        else z.current = { s: 1, x: onSwipe && Math.abs(dx) > Math.abs(dy) ? dx : 0, y: onSwipe && dy > Math.abs(dx) ? dy : 0 }
+        apply()
+      }}
+      onPointerUp={(e) => {
+        const st = g.current.start
+        g.current.pts.delete(e.pointerId)
+        if (g.current.pts.size) return begin() // one finger lifted mid-pinch: keep panning with the other
+        if (!st) return
+        const dx = e.clientX - st.px
+        const dy = e.clientY - st.py
+        if (!g.current.moved) {
+          // A tap. Two in a row: zoom in there, or back out.
+          const now = Date.now()
+          const last = g.current.lastTap
+          clearTimeout(g.current.tapTimer)
+          if (now - last.t < 300 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 40) {
+            g.current.lastTap = { t: 0, x: 0, y: 0 }
+            if (z.current.s > 1) (z.current = { s: 1, x: 0, y: 0 }), apply(true)
+            else zoomAt(2.5, e.clientX, e.clientY)
+          } else {
+            g.current.lastTap = { t: now, x: e.clientX, y: e.clientY }
+            g.current.tapTimer = window.setTimeout(() => onTap?.(), 300)
+          }
+          return
+        }
+        if (z.current.s === 1 && onSwipe) {
+          const fast = Date.now() - st.t < 300
+          const dir = Math.abs(dx) > Math.abs(dy) ? (Math.abs(dx) > (fast ? 40 : 100) ? (dx < 0 ? 'left' : 'right') : null) : dy > (fast ? 50 : 140) ? 'down' : null
+          z.current = { s: 1, x: 0, y: 0 }
+          apply(true)
+          if (dir) onSwipe(dir)
+        }
+      }}
+      onPointerCancel={(e) => {
+        g.current.pts.delete(e.pointerId)
+        if (z.current.s <= 1) (z.current = { s: 1, x: 0, y: 0 }), apply(true)
+      }}
+    >
+      <div ref={inner} className="size-full will-change-transform">
+        {children}
+      </div>
+    </div>
+  )
+}

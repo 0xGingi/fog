@@ -107,7 +107,8 @@ type Payload = (
   | { t: 'text'; id: string; text: string; ts: number; reply?: string; att?: WireAtt; fwd?: boolean; ttl?: number; men?: string[]; poll?: Poll; link?: LinkPreview }
   | { t: 'vote'; id: string; c: number[] }
   /** `to`: only that device of the recipient acts on it. 'elsewhere': answered or declined on another of our devices. */
-  | { t: 'call'; id: string; k: 'offer' | 'answer' | 'end' | 'decline' | 'busy' | 'elsewhere'; sdp?: string; video?: boolean; to?: number }
+  /** 'screen': the sender started (`on`) or stopped sharing their screen, so the other side shows it whole. */
+  | { t: 'call'; id: string; k: 'offer' | 'answer' | 'end' | 'decline' | 'busy' | 'elsewhere' | 'screen'; sdp?: string; video?: boolean; to?: number; on?: boolean }
   | { t: 'receipt'; ids: string[]; s: 'delivered' | 'read' }
   | { t: 'typing' }
   | { t: 'reset' }

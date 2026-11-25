@@ -6,6 +6,11 @@
     <application>
         <meta-data android:name="com.google.firebase.messaging.default_notification_icon" android:resource="@drawable/ic_fog_notification" />
         <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="messages" />
+        <service android:name="org.getfog.plugin.FogMessagingService" android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
         <!-- No Firebase delivery metrics. -->
         <meta-data android:name="delivery_metrics_exported_to_big_query_enabled" android:value="false" />
     </application>

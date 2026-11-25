@@ -4,7 +4,7 @@ import * as fog from './fog'
 import { attLabel, chatTitle, msgStatus, personName, timerLabel, useFog, type Chat, type LinkPreview, type Msg } from './fog'
 import { fmtDur as dur } from './media'
 import { cycleRate, download, fmtDur, fmtSize, localBlob, saveFile, seek, togglePlay, useLocalUrl, usePlayer, useTransfer, type Att } from './media'
-import { Avatar, copy, Icon, usePressMenu, type MenuAt } from './ui'
+import { Avatar, copy, Icon, usePressMenu, Zoomable, type MenuAt } from './ui'
 
 // ---------- formatting ----------
 export const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
@@ -697,33 +697,60 @@ export function MediaViewer({ chat, start, onClose }: { chat: Chat; start: strin
   const m = items[i]
   const a = m?.att
   const [url, setUrl] = useState<string | null>(null)
+  // The bars over the media: tap to hide them and see it on its own.
+  const [chrome, setChrome] = useState(true)
+  // Moving the mouse brings the bars back (and keeps a playing video's controls up while it moves).
+  const [poke, setPoke] = useState(0)
+  const lastPoke = useRef(0)
+  const nudge = (e: React.PointerEvent) => {
+    if (e.pointerType !== 'mouse' || Date.now() - lastPoke.current < 500) return
+    lastPoke.current = Date.now()
+    setChrome(true)
+    setPoke((n) => n + 1)
+  }
   const t = useTransfer(a?.lid ?? '')
   useEffect(() => {
     setUrl(null)
     if (a) download(a).then(setUrl)
   }, [a?.lid])
+  const go = (d: number) => setI((x) => Math.max(0, Math.min(items.length - 1, x + d)))
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === 'Escape') (e.stopPropagation(), onClose())
-      if (e.key === 'ArrowLeft') setI((x) => Math.max(0, x - 1))
-      if (e.key === 'ArrowRight') setI((x) => Math.min(items.length - 1, x + 1))
+      if (e.key === 'ArrowLeft') go(-1)
+      if (e.key === 'ArrowRight') go(1)
     }
     window.addEventListener('keydown', key, true)
     return () => window.removeEventListener('keydown', key, true)
   }, [onClose, items.length])
   if (!m || !a) return null
+  const fade = `transition-opacity duration-200 ${chrome ? 'opacity-100' : 'pointer-events-none opacity-0'}`
   const nav = (d: number, label: string, icon: string, side: string) =>
     items[i + d] && (
-      <button onClick={(e) => (e.stopPropagation(), setI(i + d))} aria-label={label} className={`absolute top-1/2 ${side} z-10 grid size-12 -translate-y-1/2 place-items-center rounded-full bg-white/10 text-white backdrop-blur-sm transition hover:bg-white/20 max-sm:hidden`}>
+      <button onClick={() => go(d)} aria-label={label} className={`absolute top-1/2 ${side} z-10 grid size-12 -translate-y-1/2 place-items-center rounded-full bg-black/40 text-white backdrop-blur-sm hover:bg-black/60 max-sm:hidden ${fade}`}>
         <Icon name={icon} />
       </button>
     )
   return (
-    <div className="fade-in fixed inset-0 z-50 flex flex-col bg-black/95 text-white" onClick={onClose} role="dialog" aria-label="Media viewer">
-      <header className="flex items-center gap-3 p-3 pt-[max(0.75rem,env(safe-area-inset-top))]" onClick={(e) => e.stopPropagation()}>
+    <div className="fade-in fixed inset-0 z-50 overflow-hidden bg-black text-white" role="dialog" aria-label="Media viewer" onPointerMove={nudge}>
+      <Zoomable className="absolute inset-0" reset={a.lid} onTap={() => setChrome((c) => !c)} onSwipe={(dir) => (dir === 'down' ? onClose() : go(dir === 'left' ? 1 : -1))}>
+        {!url ? (
+          <div className="grid size-full place-items-center">
+            {a.thumb && <img src={a.thumb} alt="" className="absolute inset-0 size-full object-contain opacity-60 blur-md" />}
+            <span className="relative">{t && !t.err ? <Ring p={t.p} className="size-16" /> : t?.err ? 'Download failed' : null}</span>
+          </div>
+        ) : a.kind === 'video' ? (
+          <VideoPlayer key={url} src={url} chrome={chrome} setChrome={setChrome} caption={m.text} poke={poke} />
+        ) : (
+          <img key={url} src={url} alt="Photo" draggable={false} className="pop size-full object-contain" />
+        )}
+      </Zoomable>
+      {nav(-1, 'Previous', 'back', 'left-4')}
+      {nav(1, 'Next', 'next', 'right-4')}
+      <header className={`absolute inset-x-0 top-0 z-10 flex items-center gap-3 bg-gradient-to-b from-black/70 to-transparent p-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-8 ${fade}`}>
         <div className="min-w-0 flex-1 px-2">
           <p className="truncate font-semibold">{m.mine ? 'You' : chat.group ? personName(m.from ?? '') : chatTitle(chat)}</p>
-          <p className="text-sm text-white/60">
+          <p className="text-sm text-white/70">
             {fullDate(m.ts)}
             {items.length > 1 && ` · ${i + 1} of ${items.length}`}
           </p>
@@ -735,25 +762,123 @@ export function MediaViewer({ chat, start, onClose }: { chat: Chat; start: strin
           <Icon name="close" />
         </button>
       </header>
-      <div className="relative grid min-h-0 flex-1 place-items-center p-2 sm:p-6">
-        {nav(-1, 'Previous', 'back', 'left-4')}
-        {nav(1, 'Next', 'next', 'right-4')}
-        {!url ? (
-          <div className="relative grid place-items-center">
-            {a.thumb && <img src={a.thumb} alt="" className="max-h-[70vh] max-w-full rounded-lg opacity-60 blur-md" />}
-            <span className="absolute">{t && !t.err ? <Ring p={t.p} className="size-16" /> : t?.err ? 'Download failed' : null}</span>
-          </div>
-        ) : a.kind === 'video' ? (
-          <video key={url} src={url} controls autoPlay playsInline className="pop max-h-full max-w-full rounded-lg" onClick={(e) => e.stopPropagation()} />
-        ) : (
-          <img key={url} src={url} alt="Photo" className="pop max-h-full max-w-full rounded-lg object-contain" onClick={(e) => e.stopPropagation()} />
-        )}
-      </div>
-      {m.text && (
-        <p className="mx-auto max-w-2xl px-6 pb-6 text-center text-white/90" onClick={(e) => e.stopPropagation()}>
+      {m.text && a.kind !== 'video' && (
+        <p className={`absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/70 to-transparent px-6 pt-10 pb-[max(1.5rem,env(safe-area-inset-bottom))] text-center text-white/90 ${fade}`}>
           <Rich text={m.text} />
         </p>
       )}
+    </div>
+  )
+}
+
+/**
+ * Video in the viewer, with Fog's own controls (the browser's are small, differ by platform, and
+ * on phones only appear in fullscreen): play/pause, a scrubber, time, sound, speed and fullscreen.
+ * While it plays, the controls fade out after a moment; a tap brings them back.
+ */
+function VideoPlayer({ src, chrome, setChrome, caption, poke }: { src: string; chrome: boolean; setChrome: (v: boolean) => void; caption?: string; poke: number }) {
+  const v = useRef<HTMLVideoElement>(null)
+  const [playing, setPlaying] = useState(false)
+  const [time, setTime] = useState(0)
+  const [len, setLen] = useState(0)
+  const [muted, setMuted] = useState(false)
+  const [rate, setRate] = useState(1)
+  const [waiting, setWaiting] = useState(false)
+  const [seeking, setSeeking] = useState(false)
+  const toggle = () => {
+    const el = v.current
+    if (!el) return
+    if (el.paused || el.ended) void el.play().catch(() => {})
+    else el.pause()
+  }
+  useEffect(() => {
+    if (!playing || !chrome || seeking) return
+    const t = setTimeout(() => setChrome(false), 2500)
+    return () => clearTimeout(t)
+  }, [playing, chrome, seeking, time > 0, poke])
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === ' ' || e.key === 'k') (e.preventDefault(), toggle())
+      if (e.key === 'm') setMuted((x) => !x)
+    }
+    window.addEventListener('keydown', key)
+    return () => window.removeEventListener('keydown', key)
+  }, [])
+  useEffect(() => {
+    if (v.current) (v.current.muted = muted), (v.current.playbackRate = rate)
+  }, [muted, rate])
+  // Taps on the controls are theirs, not the viewer's (which would hide the controls).
+  const own = { onPointerDown: (e: React.PointerEvent) => e.stopPropagation(), onPointerUp: (e: React.PointerEvent) => e.stopPropagation() }
+  return (
+    <div className="relative size-full">
+      <video
+        ref={v}
+        src={src}
+        autoPlay
+        playsInline
+        className="pop size-full object-contain"
+        onPlay={() => setPlaying(true)}
+        onPause={() => (setPlaying(false), setChrome(true))}
+        onTimeUpdate={(e) => !seeking && setTime(e.currentTarget.currentTime)}
+        onLoadedMetadata={(e) => setLen(e.currentTarget.duration || 0)}
+        onDurationChange={(e) => setLen(e.currentTarget.duration || 0)}
+        onWaiting={() => setWaiting(true)}
+        onPlaying={() => setWaiting(false)}
+        onEnded={() => setChrome(true)}
+      />
+      {waiting && playing && (
+        <span className="pointer-events-none absolute inset-0 grid place-items-center">
+          <span className="size-12 animate-spin rounded-full border-4 border-white/25 border-t-white" />
+        </span>
+      )}
+      {!playing && !waiting && (
+        <button {...own} onClick={toggle} aria-label="Play" className={`absolute top-1/2 left-1/2 grid size-20 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full bg-black/45 backdrop-blur-md transition hover:bg-black/60 active:scale-95 ${chrome ? '' : 'opacity-0'}`}>
+          <Icon name="play" className="size-9 translate-x-0.5 fill-current" />
+        </button>
+      )}
+      <div {...own} className={`absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/75 to-transparent px-3 pt-12 pb-[max(0.75rem,env(safe-area-inset-bottom))] transition-opacity duration-200 sm:px-6 ${chrome ? 'opacity-100' : 'pointer-events-none opacity-0'}`}>
+        {caption && (
+          <p className="mx-auto mb-2 max-w-2xl text-center text-white/90">
+            <Rich text={caption} />
+          </p>
+        )}
+        <input
+          type="range"
+          min={0}
+          max={len || 0}
+          step={0.01}
+          value={Math.min(time, len || 0)}
+          aria-label="Position"
+          onPointerDown={() => setSeeking(true)}
+          onPointerUp={() => setSeeking(false)}
+          onChange={(e) => {
+            const x = Number(e.target.value)
+            setTime(x)
+            if (v.current) v.current.currentTime = x
+          }}
+          className="h-6 w-full cursor-pointer accent-[var(--lamp)]"
+        />
+        <div className="flex items-center gap-1">
+          <button onClick={toggle} aria-label={playing ? 'Pause' : 'Play'} className="grid size-11 place-items-center rounded-full hover:bg-white/10">
+            <Icon name={playing ? 'pause' : 'play'} className={`size-6 ${playing ? '' : 'fill-current'}`} />
+          </button>
+          <span className="px-1 text-sm text-white/85 tabular-nums">
+            {fmtDur(time)} / {fmtDur(len)}
+          </span>
+          <span className="flex-1" />
+          <button onClick={() => setRate((r) => (r === 1 ? 1.5 : r === 1.5 ? 2 : 1))} aria-label="Playback speed" className="h-11 min-w-11 rounded-full px-2 text-sm font-semibold hover:bg-white/10">
+            {rate}×
+          </button>
+          <button onClick={() => setMuted((x) => !x)} aria-label={muted ? 'Unmute' : 'Mute'} className="grid size-11 place-items-center rounded-full hover:bg-white/10">
+            <Icon name={muted ? 'muted' : 'volume'} />
+          </button>
+          {document.fullscreenEnabled && (
+            <button onClick={() => (document.fullscreenElement ? document.exitFullscreen() : v.current?.closest('[role=dialog]')?.requestFullscreen())} aria-label="Fullscreen" className="grid size-11 place-items-center rounded-full hover:bg-white/10">
+              <Icon name="expand" />
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
