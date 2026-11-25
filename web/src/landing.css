@@ -1,0 +1,147 @@
+@import 'tailwindcss' source(none);
+@source '../index.html';
+@source './landing.ts';
+@import '@fontsource-variable/onest';
+
+/* Same palette as the app: cool mist greys, sodium-lamp amber; blue-slate night fog when dark. */
+:root {
+  --bg: #eef1f4;
+  --panel: #ffffff;
+  --raised: #f3f5f8;
+  --ink: #15202b;
+  --muted: #5d6976;
+  --line: #dde3e9;
+  --lamp: #e8a325;
+  --lamp-ink: #2a1d04;
+  --lamp-text: #8a5f0c;
+  --out: #fbe4a9;
+  --out-ink: #2a1d04;
+  --in: #ffffff;
+  --chat: #dfe5eb;
+  --code: #15202b;
+  --code-ink: #c9d4df;
+  --glow: rgba(243, 184, 74, 0.35);
+  --wave: rgba(21, 32, 43, 0.07);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101820;
+    --panel: #17202a;
+    --raised: #1d2733;
+    --ink: #e6ecf2;
+    --muted: #93a1b0;
+    --line: #24303d;
+    --lamp: #f3b84a;
+    --lamp-ink: #221704;
+    --lamp-text: #f5c562;
+    --out: #5c4519;
+    --out-ink: #fdf2dc;
+    --in: #222e3b;
+    --chat: #141e28;
+    --code: #0a0f14;
+    --code-ink: #b7c4d1;
+    --glow: rgba(243, 184, 74, 0.18);
+    --wave: rgba(230, 236, 242, 0.06);
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --font-sans: 'Onest Variable', ui-sans-serif, system-ui, sans-serif;
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-raised: var(--raised);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-lamp: var(--lamp);
+  --color-lamp-ink: var(--lamp-ink);
+  --color-lamp-text: var(--lamp-text);
+  --color-out: var(--out);
+  --color-out-ink: var(--out-ink);
+  --color-in: var(--in);
+  --color-chat: var(--chat);
+  --color-code: var(--code);
+  --color-code-ink: var(--code-ink);
+}
+
+@layer base {
+  html {
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    scroll-behavior: smooth;
+  }
+  :focus-visible {
+    outline: 2px solid var(--lamp);
+    outline-offset: 3px;
+    border-radius: 6px;
+  }
+}
+
+/* A lamp in the fog: one warm glow behind the demo, drifting wave lines across the hero. */
+.fogbank-waves {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-color: var(--wave);
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='480' height='240' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round'%3E%3Cpath d='M-20 40c60-20 120 20 180 0s120-20 180 0 120 20 180 0'/%3E%3Cpath d='M-20 120c50-16 100 16 150 0s100-16 150 0 100 16 150 0 50 8 80 0'/%3E%3Cpath d='M-20 200c60-20 120 20 180 0s120-20 180 0 120 20 180 0'/%3E%3C/svg%3E")
+    0 0 / 480px 240px;
+  animation: drift 60s linear infinite;
+}
+.glow {
+  background: radial-gradient(40rem 24rem at 70% 50%, var(--glow), transparent 70%);
+}
+@keyframes drift {
+  to {
+    mask-position: 480px 0;
+  }
+}
+
+/* The page's one entrance: the headline clears like fog lifting. */
+.lift {
+  animation: lift 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes lift {
+  from {
+    filter: blur(14px);
+    opacity: 0;
+    letter-spacing: 0.04em;
+  }
+}
+
+.cipher {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.row-in {
+  animation: row-in 0.35s ease-out both;
+}
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* The recovery phrase stays fogged until you look at it, as in the app. */
+.fogged {
+  filter: blur(6px);
+  transition: filter 0.4s ease;
+}
+.phrase:hover .fogged,
+.phrase:focus-within .fogged {
+  filter: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lift,
+  .row-in,
+  .fogbank-waves {
+    animation: none;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+}

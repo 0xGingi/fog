@@ -1,0 +1,8 @@
+[workspace]
+resolver = "3"
+members = ["core", "server"]
+exclude = ["web/src-tauri"]
+
+[profile.release]
+opt-level = "s"
+lto = true

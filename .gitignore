@@ -1,0 +1,10 @@
+target/
+node_modules/
+dist/
+web/src/core/
+*.db
+*.db-*
+.env
+web/dist-desktop/
+web/src-tauri/target/
+web/src-tauri/gen/

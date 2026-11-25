@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSCameraUsageDescription</key>
+  <string>Fog uses the camera for video calls, video messages and scanning QR codes.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Fog uses the microphone for calls, voice messages and video messages.</string>
+</dict>
+</plist>

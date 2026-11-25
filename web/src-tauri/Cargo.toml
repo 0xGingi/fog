@@ -1,0 +1,13 @@
+[package]
+name = "fog-desktop"
+version = "0.1.0"
+description = "Fog desktop app"
+license = "AGPL-3.0-only"
+edition = "2024"
+rust-version = "1.90"
+
+[build-dependencies]
+tauri-build = { version = "2.7.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.7", features = [] }

@@ -1,0 +1,51 @@
+# Fog at https://${FOG_DOMAIN}: Caddy (HTTPS) -> fog (app + API), coturn for call relay.
+# Setup: cp .env.example .env, edit it, point DNS at this host, then `docker compose up -d --build`.
+services:
+  fog:
+    build: .
+    restart: unless-stopped
+    environment:
+      FOG_ICE_HOST: ${FOG_DOMAIN:?set FOG_DOMAIN in .env}
+      # Logins are bound to this name; WebSocket requests for any other Host are refused.
+      FOG_HOST: ${FOG_DOMAIN}
+      FOG_TURN_SECRET: ${FOG_TURN_SECRET:?set FOG_TURN_SECRET in .env}
+      # Caddy forwards the real client IP; rate limits and signup caps key on it.
+      FOG_TRUST_PROXY: "1"
+    volumes:
+      - fog-data:/data
+    expose:
+      - "8787"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [fog]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      FOG_DOMAIN: ${FOG_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  # TURN relays call media when a direct connection isn't possible, and hides IPs when
+  # "relay all calls" is on. Host networking because TURN needs a wide UDP port range.
+  turn:
+    image: coturn/coturn:4.7
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -c
+      - /etc/coturn/turnserver.conf
+      - --static-auth-secret=${FOG_TURN_SECRET}
+      - --realm=${FOG_DOMAIN}
+    volumes:
+      - ./deploy/turnserver.conf:/etc/coturn/turnserver.conf:ro
+
+volumes:
+  fog-data:
+  caddy-data:
+  caddy-config:

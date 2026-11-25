@@ -1,0 +1,1657 @@
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import * as fog from './fog'
+import { chatAvatar, chatTitle, isMuted, msgStatus, personName, SAVED, shortId, timerLabel, TIMERS, useFog, type Chat, type Msg } from './fog'
+import { ChatPane } from './chat'
+import { CallScreen } from './callscreen'
+import { renderSVG } from 'uqr'
+import { fmtTime, snippet, Ticks } from './bubble'
+import { avatarFrom, download, useLocalUrl } from './media'
+import * as db from './db'
+import { Avatar, Button, copy, Dialog, Drawer, Icon, IconButton, Menu, MenuItem, Row, Section, Spinner, Toaster, Toggle, usePressMenu, type MenuAt } from './ui'
+function fmtListTime(ts: number) {
+  const d = new Date(ts)
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) return fmtTime(ts)
+  if (now.getTime() - ts < 6 * 864e5) return d.toLocaleDateString([], { weekday: 'short' })
+  return d.toLocaleDateString([], { day: 'numeric', month: 'short' })
+}
+
+// ---------- app ----------
+export function App() {
+  const phase = useFog((s) => s.phase)
+  return (
+    <>
+      {phase === 'loading' ? (
+        <div className="fogbank h-full" />
+      ) : phase === 'locked' ? (
+        <Locked />
+      ) : phase === 'unlock' ? (
+        <LockScreen />
+      ) : phase === 'welcome' ? (
+        <Onboarding />
+      ) : phase === 'username' ? (
+        <UsernameStep />
+      ) : (
+        <Main />
+      )}
+      {phase === 'app' && <CallScreen />}
+      <Toaster />
+    </>
+  )
+}
+
+function Centered({ children }: { children: ReactNode }) {
+  return (
+    <div className="fogbank flex min-h-full items-center justify-center p-4">
+      <div className="fade-in w-full max-w-md rounded-3xl bg-panel p-8 shadow-[0_30px_80px_-30px_rgba(20,30,40,0.35)]">{children}</div>
+    </div>
+  )
+}
+
+function Locked() {
+  return (
+    <Centered>
+      <h1 className="text-2xl font-bold">Fog is open in another tab</h1>
+      <p className="mt-2 text-muted">Only one tab can hold your keys at a time. Close the other tab and Fog continues here.</p>
+    </Centered>
+  )
+}
+
+function LockScreen() {
+  const [code, setCode] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [passkey, setPasskey] = useState(false)
+  const [forgot, setForgot] = useState(false)
+  useEffect(() => void db.passkeyEnabled().then(setPasskey), [])
+  const done = () => fog.unlocked()
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    setErr(null)
+    try {
+      await db.unlockWithPasscode(code)
+      done()
+    } catch {
+      setErr('Wrong passcode. Try again.')
+      setCode('')
+      setBusy(false)
+    }
+  }
+  return (
+    <Centered>
+      <div className="flex flex-col items-center text-center">
+        <span className="grid size-16 place-items-center rounded-2xl bg-lamp text-lamp-ink">
+          <Icon name="lockOn" className="size-8" />
+        </span>
+        <h1 className="mt-4 text-2xl font-bold">Fog is locked</h1>
+        <p className="mt-1 text-muted">Your messages are encrypted on this device.</p>
+      </div>
+      <form onSubmit={submit} className="mt-6">
+        <input
+          type="password"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          autoFocus
+          autoComplete="current-password"
+          placeholder="Passcode"
+          aria-label="Passcode"
+          aria-invalid={!!err}
+          className={`h-14 w-full rounded-2xl border bg-raised px-4 text-center text-lg tracking-widest outline-none focus:border-lamp ${err ? 'border-danger' : 'border-line'}`}
+        />
+        <p role="alert" className="mt-1 h-5 text-center text-sm text-danger">
+          {err}
+        </p>
+        <Button className="mt-2 w-full" disabled={!code || busy}>
+          {busy ? <Spinner /> : 'Unlock'}
+        </Button>
+      </form>
+      {passkey && (
+        <Button
+          kind="soft"
+          className="mt-2 w-full"
+          onClick={async () => {
+            try {
+              await db.unlockWithPasskey()
+              done()
+            } catch {
+              setErr("Passkey didn't work. Use your passcode instead.")
+            }
+          }}
+        >
+          <span className="flex items-center justify-center gap-2">
+            <Icon name="key" className="size-5" /> Unlock with passkey
+          </span>
+        </Button>
+      )}
+      <button onClick={() => setForgot(true)} className="mt-4 w-full text-sm text-muted hover:text-ink">
+        Forgot your passcode?
+      </button>
+      {forgot && (
+        <Dialog
+          title="Reset Fog on this device?"
+          onClose={() => setForgot(false)}
+          actions={
+            <>
+              <Button kind="ghost" onClick={() => setForgot(false)}>
+                Cancel
+              </Button>
+              <Button kind="danger" onClick={fog.logout}>
+                Erase and start over
+              </Button>
+            </>
+          }
+        >
+          Without the passcode, the data on this device can't be decrypted. You can erase it and restore your account with your 24-word recovery phrase. Messages stored only on this device will be lost.
+        </Dialog>
+      )}
+    </Centered>
+  )
+}
+
+/** App lock settings: passcode, passkey, auto-lock. */
+function AppLockDialog({ onClose }: { onClose: () => void }) {
+  const settings = useFog((s) => s.settings)
+  const [on, setOn] = useState<boolean | null>(null)
+  const [hasPasskey, setHasPasskey] = useState(false)
+  const [step, setStep] = useState<'main' | 'set' | 'autolock'>('main')
+  const [a, setA] = useState('')
+  const [b, setB] = useState('')
+  const [busy, setBusy] = useState(false)
+  const refresh = () => Promise.all([db.lockEnabled(), db.passkeyEnabled()]).then(([l, p]) => (setOn(l), setHasPasskey(p)))
+  useEffect(() => void refresh(), [])
+  const bits = db.passcodeBits(a)
+  const ok = a.length >= 8 && bits >= db.MIN_PASSCODE_BITS && a === b
+  if (on === null) return null
+  if (step === 'autolock')
+    return (
+      <Choice
+        title="Auto-lock"
+        options={[
+          [1, 'After 1 minute'],
+          [5, 'After 5 minutes'],
+          [60, 'After 1 hour'],
+          [0, 'Never (only when I lock it)'],
+        ]}
+        value={settings.autoLock}
+        onPick={(v) => fog.updateSettings({ autoLock: v })}
+        onClose={() => setStep('main')}
+      />
+    )
+  if (step === 'set' || !on)
+    return (
+      <Dialog
+        title={on ? 'Change passcode' : 'Turn on app lock'}
+        onClose={onClose}
+        actions={
+          <>
+            <Button kind="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!ok || busy}
+              onClick={async () => {
+                setBusy(true)
+                if (on) await db.changePasscode(a)
+                else await db.enableLock(a)
+                fog.toast(on ? 'Passcode changed' : 'App lock is on')
+                setBusy(false)
+                setA('')
+                setB('')
+                setStep('main')
+                refresh()
+              }}
+            >
+              {busy ? <Spinner /> : on ? 'Change' : 'Turn on'}
+            </Button>
+          </>
+        }
+      >
+        <p>Everything Fog stores on this device gets encrypted with your passcode. If you forget it, you'll need your recovery phrase.</p>
+        <input type="password" autoFocus autoComplete="new-password" value={a} onChange={(e) => setA(e.target.value)} placeholder="New passcode (8+ characters)" aria-label="New passcode" className="mt-4 h-12 w-full rounded-xl border border-line bg-raised px-4 text-base text-ink outline-none focus:border-lamp" />
+        {a && (
+          <div className="mt-2" aria-live="polite">
+            <div className="flex h-1.5 gap-1">
+              {[0, 1, 2].map((i) => (
+                <span key={i} className={`flex-1 rounded-full ${bits >= [20, db.MIN_PASSCODE_BITS, 60][i] ? (bits >= 60 ? 'bg-emerald-500' : bits >= db.MIN_PASSCODE_BITS ? 'bg-lamp' : 'bg-danger') : 'bg-line'}`} />
+              ))}
+            </div>
+            <p className={`mt-1 text-sm ${bits >= db.MIN_PASSCODE_BITS && a.length >= 8 ? 'text-muted' : 'text-danger'}`}>
+              {a.length < 8 ? 'Use at least 8 characters.' : bits < db.MIN_PASSCODE_BITS ? 'Too easy to guess. Add length or mix in letters and symbols.' : bits < 60 ? 'Good.' : 'Strong.'}
+            </p>
+          </div>
+        )}
+        <input type="password" autoComplete="new-password" value={b} onChange={(e) => setB(e.target.value)} placeholder="Repeat passcode" aria-label="Repeat passcode" className="mt-2 h-12 w-full rounded-xl border border-line bg-raised px-4 text-base text-ink outline-none focus:border-lamp" />
+        {b && a !== b && <p className="mt-1 text-sm text-danger">Passcodes don't match.</p>}
+      </Dialog>
+    )
+  return (
+    <Dialog title="App lock" onClose={onClose} actions={<Button onClick={onClose}>Done</Button>}>
+      <div className="-mx-3 mt-1 text-ink">
+        <Row icon="timer" title="Auto-lock" sub={settings.autoLock ? `After ${settings.autoLock === 60 ? '1 hour' : `${settings.autoLock} minute${settings.autoLock > 1 ? 's' : ''}`} without activity` : 'Never'} onClick={() => setStep('autolock')} />
+        {db.passkeySupported() && (
+          <Row
+            icon="key"
+            title={hasPasskey ? 'Passkey unlock is on' : 'Unlock with a passkey'}
+            sub={hasPasskey ? 'Tap to remove' : 'Touch ID, Face ID, Windows Hello or a security key'}
+            onClick={async () => {
+              try {
+                if (hasPasskey) await db.removePasskey()
+                else await db.addPasskey()
+                fog.toast(hasPasskey ? 'Passkey removed' : 'Passkey added')
+                refresh()
+              } catch {
+                fog.toast("This browser or device can't use a passkey for app lock")
+              }
+            }}
+          />
+        )}
+        <Row icon="pencil" title="Change passcode" onClick={() => setStep('set')} />
+        <Row icon="lockOn" title="Lock now" onClick={fog.lockNow} />
+        <Row
+          icon="close"
+          title={<span className="text-danger">Turn off app lock</span>}
+          onClick={async () => {
+            await db.disableLock()
+            fog.toast('App lock is off')
+            onClose()
+          }}
+        />
+      </div>
+    </Dialog>
+  )
+}
+
+function Onboarding() {
+  const [step, setStep] = useState<'welcome' | 'create' | 'restore'>('welcome')
+  if (step === 'create') return <CreateStep onBack={() => setStep('welcome')} />
+  if (step === 'restore') return <RestoreStep onBack={() => setStep('welcome')} />
+  return (
+    <div className="fogbank flex min-h-full flex-col items-center justify-center px-6 text-center">
+      <h1 className="wordmark text-[clamp(96px,22vw,180px)] leading-none font-[850] tracking-[-0.06em]">fog</h1>
+      <p className="mt-8 max-w-sm text-lg text-muted">Private messaging with no phone number, email or password. Your account is a key that only you hold.</p>
+      <div className="mt-10 flex w-full max-w-xs flex-col gap-2">
+        <Button onClick={() => setStep('create')}>Create account</Button>
+        <Button kind="ghost" onClick={() => setStep('restore')}>
+          I have a recovery phrase
+        </Button>
+      </div>
+      <p className="mt-10 flex items-center gap-1.5 text-sm text-muted">
+        <Icon name="lock" className="size-4" /> End-to-end encrypted with the Signal protocol
+      </p>
+      <style>{`.wordmark{animation:clear 1.6s cubic-bezier(.2,.7,.2,1) both}@keyframes clear{from{filter:blur(18px);opacity:.15;letter-spacing:.05em}}`}</style>
+    </div>
+  )
+}
+
+function Back({ onClick }: { onClick: () => void }) {
+  return (
+    <button onClick={onClick} className="-ml-2 mb-4 flex items-center text-sm text-muted hover:text-ink">
+      <Icon name="back" className="size-5" /> Back
+    </button>
+  )
+}
+
+function CreateStep({ onBack }: { onBack: () => void }) {
+  const phrase = useMemo(() => fog.newPhrase(), [])
+  const [shown, setShown] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  return (
+    <Centered>
+      <Back onClick={onBack} />
+      <h1 className="text-2xl font-bold">Your recovery phrase</h1>
+      <p className="mt-2 text-muted">These 24 words are your account. Anyone who has them can read your messages. If you lose them, nobody can recover your account.</p>
+      <div className="relative mt-6">
+        <ol className={`grid grid-cols-2 gap-x-4 gap-y-2 rounded-2xl bg-raised p-4 sm:grid-cols-3 ${shown ? '' : 'fogged'}`}>
+          {phrase.split(' ').map((w, i) => (
+            <li key={i} className="flex gap-2 text-[15px]">
+              <span className="w-5 text-right text-muted tabular-nums">{i + 1}</span>
+              <span className="font-medium">{w}</span>
+            </li>
+          ))}
+        </ol>
+        {!shown && (
+          <button onClick={() => setShown(true)} className="absolute inset-0 grid place-items-center rounded-2xl font-semibold">
+            <span className="flex items-center gap-2 rounded-full bg-panel px-4 py-2 shadow">
+              <Icon name="eye" className="size-5" /> Show words
+            </span>
+          </button>
+        )}
+      </div>
+      {shown && (
+        <button onClick={() => copy(phrase, 'Recovery phrase copied')} className="mt-2 flex items-center gap-1.5 text-sm text-muted hover:text-ink">
+          <Icon name="copy" className="size-4" /> Copy words
+        </button>
+      )}
+      <label className="mt-6 flex cursor-pointer items-start gap-3">
+        <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} disabled={!shown} className="mt-0.5 size-5 accent-[var(--lamp)]" />
+        <span>I've written these words down somewhere safe</span>
+      </label>
+      {err && (
+        <p role="alert" className="mt-4 text-sm text-danger">
+          {err}
+        </p>
+      )}
+      <Button
+        className="mt-6 w-full"
+        disabled={!saved || busy}
+        onClick={() => (setBusy(true), setErr(null), fog.createAccount(phrase).catch((e) => (setErr(e.message), setBusy(false))))}
+      >
+        {busy ? (
+          <span className="flex items-center justify-center gap-2">
+            <Spinner /> Creating your keys
+          </span>
+        ) : (
+          'Continue'
+        )}
+      </Button>
+    </Centered>
+  )
+}
+
+function RestoreStep({ onBack }: { onBack: () => void }) {
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const words = text.trim().split(/\s+/).filter(Boolean).length
+  const valid = fog.validPhrase(text.toLowerCase())
+  return (
+    <Centered>
+      <Back onClick={onBack} />
+      <h1 className="text-2xl font-bold">Restore your account</h1>
+      <p className="mt-2 text-muted">Enter your 24-word recovery phrase. Messages from your old device stay there; new ones arrive here.</p>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={5}
+        autoFocus
+        spellCheck={false}
+        autoCapitalize="none"
+        autoComplete="off"
+        placeholder="word1 word2 word3 …"
+        className="mt-6 w-full resize-none rounded-2xl border border-line bg-raised p-4 text-base outline-none focus:border-lamp"
+      />
+      <p className={`mt-1 text-sm ${words >= 24 && !valid ? 'text-danger' : 'text-muted'}`}>
+        {words >= 24 && !valid ? "That phrase isn't valid. Check each word's spelling." : `${words} of 24 words`}
+      </p>
+      {err && (
+        <p role="alert" className="mt-4 text-sm text-danger">
+          {err}
+        </p>
+      )}
+      <Button
+        className="mt-6 w-full"
+        disabled={!valid || busy}
+        onClick={() => (setBusy(true), setErr(null), fog.createAccount(text.toLowerCase()).catch((e) => (setErr(e.message), setBusy(false))))}
+      >
+        {busy ? (
+          <span className="flex items-center justify-center gap-2">
+            <Spinner /> Restoring
+          </span>
+        ) : (
+          'Restore account'
+        )}
+      </Button>
+    </Centered>
+  )
+}
+
+/** Username field with live availability. Shared by onboarding and settings. */
+function useUsername(initial = '') {
+  const [name, setName] = useState(initial)
+  const [status, setStatus] = useState<'idle' | 'checking' | 'available' | 'taken' | 'invalid'>('idle')
+  useEffect(() => {
+    if (!name || name === initial) return setStatus('idle')
+    setStatus('checking')
+    const t = setTimeout(() => fog.checkUsername(name).then(setStatus), 350)
+    return () => clearTimeout(t)
+  }, [name, initial])
+  const hint = {
+    idle: '3 to 32 characters: lowercase letters, numbers and underscores.',
+    checking: 'Checking…',
+    available: `@${name} is available`,
+    taken: `@${name} is taken`,
+    invalid: 'Start with a letter. Use only lowercase letters, numbers and underscores.',
+  }[status]
+  const field = (
+    <>
+      <div className="flex items-center rounded-2xl border border-line bg-raised px-4 focus-within:border-lamp">
+        <span className="text-lg text-muted">@</span>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value.toLowerCase().replace(/\s/g, ''))}
+          autoFocus
+          maxLength={32}
+          spellCheck={false}
+          autoCapitalize="none"
+          className="h-14 w-full bg-transparent pl-1 text-lg text-ink outline-none"
+          aria-describedby="uname-hint"
+        />
+      </div>
+      <p id="uname-hint" className={`mt-1 text-sm ${status === 'available' ? 'text-emerald-600 dark:text-emerald-400' : status === 'taken' || status === 'invalid' ? 'text-danger' : 'text-muted'}`}>
+        {hint}
+      </p>
+    </>
+  )
+  return { name, status, setStatus, field }
+}
+
+function UsernameStep() {
+  const u = useUsername()
+  const [busy, setBusy] = useState(false)
+  return (
+    <Centered>
+      <h1 className="text-2xl font-bold">Choose a username</h1>
+      <p className="mt-2 text-muted">People find you by your username. It's the only thing about you the server knows.</p>
+      <form
+        className="mt-6"
+        onSubmit={async (e) => {
+          e.preventDefault()
+          setBusy(true)
+          try {
+            await fog.claimUsername(u.name)
+          } catch {
+            u.setStatus('taken')
+            setBusy(false)
+          }
+        }}
+      >
+        {u.field}
+        <Button className="mt-6 w-full" disabled={u.status !== 'available' || busy}>
+          {busy ? <Spinner /> : 'Continue'}
+        </Button>
+      </form>
+      <button onClick={fog.skipUsername} className="mt-3 w-full text-sm text-muted hover:text-ink">
+        Skip for now. People can still reach you by account ID.
+      </button>
+    </Centered>
+  )
+}
+
+// ---------- main layout ----------
+const lastTs = (c: Chat) => c.messages.at(-1)?.ts ?? 0
+const sortedChats = (chats: Record<string, Chat>) => Object.values(chats).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || lastTs(b) - lastTs(a))
+
+function Main() {
+  const active = useFog((s) => s.active)
+  const lockPrompted = useFog((s) => s.settings.lockPrompted)
+  const [protect, setProtect] = useState<'ask' | 'set' | null>(null)
+  useEffect(() => {
+    if (!lockPrompted) db.lockEnabled().then((on) => (on ? fog.updateSettings({ lockPrompted: true }) : setProtect('ask')))
+  }, [])
+  const [panel, setPanel] = useState<'none' | 'settings' | 'new' | 'group' | 'archived' | 'requests'>('none')
+  const [info, setInfo] = useState(false)
+  const search = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const s = fog.getState()
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPanel('none')
+        search.current?.focus()
+      } else if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        e.preventDefault()
+        const list = sortedChats(s.chats)
+        const i = list.findIndex((c) => c.id === s.active)
+        const next = list[i + (e.key === 'ArrowDown' ? 1 : -1)] ?? list[e.key === 'ArrowDown' ? 0 : list.length - 1]
+        if (next) fog.openChat(next.id)
+      } else if (e.key === 'Escape' && !document.querySelector('[data-drawer],[role=menu],[role=dialog]')) {
+        fog.openChat(null)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  useEffect(() => setInfo(false), [active])
+  return (
+    <div className="flex h-full overflow-hidden bg-panel">
+      <aside className={`relative flex w-full flex-col overflow-hidden border-line md:w-[340px] md:border-r lg:w-[380px] ${active ? 'max-md:hidden' : ''}`}>
+        <Sidebar searchRef={search} onMenu={() => setPanel('settings')} onNew={() => setPanel('new')} onArchived={() => setPanel('archived')} onRequests={() => setPanel('requests')} />
+        {panel === 'settings' && <Settings onClose={() => setPanel('none')} />}
+        {panel === 'new' && <NewChat onClose={() => setPanel('none')} onGroup={() => setPanel('group')} />}
+        {panel === 'group' && <NewGroup onClose={() => setPanel('none')} />}
+        {panel === 'archived' && <Archived onClose={() => setPanel('none')} />}
+        {panel === 'requests' && <Archived requests onClose={() => setPanel('none')} />}
+      </aside>
+      <main className={`min-w-0 flex-1 ${active ? '' : 'max-md:hidden'}`}>
+        {active ? <ChatPane key={active} id={active} onInfo={() => setInfo((v) => !v)} /> : <EmptyPane />}
+      </main>
+      {active && info && <ChatInfo key={active} id={active} onClose={() => setInfo(false)} />}
+      {protect === 'ask' && (
+        <Dialog
+          title="Protect Fog on this device"
+          onClose={() => (fog.updateSettings({ lockPrompted: true }), setProtect(null))}
+          actions={
+            <>
+              <Button kind="ghost" onClick={() => (fog.updateSettings({ lockPrompted: true }), setProtect(null))}>
+                Not now
+              </Button>
+              <Button onClick={() => (fog.updateSettings({ lockPrompted: true }), setProtect('set'))}>Set a passcode</Button>
+            </>
+          }
+        >
+          Your keys and messages are stored on this device. With a passcode (or Touch ID / Face ID), they're encrypted so nobody with access to this computer or browser can read them. You can change this later in Settings.
+        </Dialog>
+      )}
+      {protect === 'set' && <AppLockDialog onClose={() => setProtect(null)} />}
+    </div>
+  )
+}
+
+function EmptyPane() {
+  return (
+    <div className="fogbank grid h-full place-items-center">
+      <span className="rounded-full bg-black/25 px-4 py-1.5 text-sm font-medium text-white backdrop-blur-md dark:bg-white/10">Select a chat to start messaging</span>
+    </div>
+  )
+}
+
+function Sidebar({ onMenu, onNew, onArchived, onRequests, searchRef }: { onMenu: () => void; onNew: () => void; onArchived: () => void; onRequests: () => void; searchRef: React.RefObject<HTMLInputElement | null> }) {
+  const chats = useFog((s) => s.chats)
+  const people = useFog((s) => s.people)
+  const active = useFog((s) => s.active)
+  const conn = useFog((s) => s.conn)
+  const [filter, setFilter] = useState('')
+  const q = filter.trim().toLowerCase()
+  const list = sortedChats(chats).filter((c) => !c.request && (q ? chatTitle(c, people[c.id]).toLowerCase().includes(q) || people[c.id]?.username?.includes(q) : !c.archived))
+  const archived = Object.values(chats).filter((c) => c.archived && !c.request)
+  const requests = Object.values(chats).filter((c) => c.request)
+  const hits = useMemo(() => {
+    if (q.length < 2) return []
+    const out: { chat: Chat; m: Msg }[] = []
+    for (const c of Object.values(chats))
+      for (const m of c.messages) if (!m.sys && (m.text.toLowerCase().includes(q) || m.att?.name.toLowerCase().includes(q))) out.push({ chat: c, m })
+    return out.sort((a, b) => b.m.ts - a.m.ts).slice(0, 50)
+  }, [chats, q])
+
+  return (
+    <>
+      <header className="flex h-16 shrink-0 items-center gap-2 px-3">
+        <IconButton icon="menu" label="Settings" onClick={onMenu} />
+        <div className="flex h-10 flex-1 items-center gap-2 rounded-full bg-raised px-3 text-muted focus-within:ring-2 focus-within:ring-lamp/50">
+          {conn === 'online' ? <Icon name="search" className="size-5 shrink-0" /> : <Spinner className="size-4 shrink-0" />}
+          <input
+            ref={searchRef}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => e.key === 'Escape' && (setFilter(''), e.currentTarget.blur())}
+            placeholder={conn === 'online' ? 'Search' : 'Connecting…'}
+            aria-label="Search chats and messages"
+            className="w-full bg-transparent text-base text-ink outline-none placeholder:text-muted md:text-[15px]"
+          />
+          {filter && <IconButton icon="close" label="Clear search" onClick={() => setFilter('')} className="-mr-2 size-8" />}
+        </div>
+      </header>
+      <nav
+        className="scroll-thin flex-1 overflow-y-auto px-2 pb-24"
+        aria-label="Chats"
+        onKeyDown={(e) => {
+          // Arrow keys move between chats, like a list.
+          if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+          const rows = [...e.currentTarget.querySelectorAll<HTMLElement>(':scope > button')]
+          const i = rows.indexOf(document.activeElement as HTMLElement)
+          if (i < 0) return
+          e.preventDefault()
+          rows[Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]?.focus()
+        }}
+      >
+        {q && list.length > 0 && <p className="px-3 pt-2 pb-1 text-sm font-semibold text-muted">Chats</p>}
+        {!q && requests.length > 0 && (
+          <button onClick={onRequests} className="flex w-full items-center gap-3 rounded-2xl p-2.5 text-left transition hover:bg-hover">
+            <span className="grid size-[54px] shrink-0 place-items-center rounded-full bg-lamp/20 text-lamp">
+              <Icon name="inbox" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block font-semibold">Message requests</span>
+              <span className="block truncate text-[15px] text-muted">{requests.map((c) => chatTitle(c, people[c.id])).join(', ')}</span>
+            </span>
+            <span className="grid h-5 min-w-5 place-items-center rounded-full bg-lamp px-1.5 text-xs font-bold text-lamp-ink">{requests.length}</span>
+          </button>
+        )}
+        {!q && archived.length > 0 && (
+          <button onClick={onArchived} className="flex w-full items-center gap-3 rounded-2xl p-2.5 text-left transition hover:bg-hover">
+            <span className="grid size-[54px] shrink-0 place-items-center rounded-full bg-raised text-muted">
+              <Icon name="archive" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block font-semibold">Archived chats</span>
+              <span className="block truncate text-[15px] text-muted">{archived.map((c) => chatTitle(c, people[c.id])).join(', ')}</span>
+            </span>
+            {archived.some((c) => c.unread) && <span className="grid h-5 min-w-5 place-items-center rounded-full bg-muted/40 px-1.5 text-xs font-bold text-ink">{archived.reduce((n, c) => n + c.unread, 0)}</span>}
+          </button>
+        )}
+        {list.map((c) => (
+          <ChatRow key={c.id} chat={c} active={c.id === active} />
+        ))}
+        {hits.length > 0 && (
+          <>
+            <p className="px-3 pt-4 pb-1 text-sm font-semibold text-muted">Messages</p>
+            {hits.map(({ chat, m }) => (
+              <button
+                key={m.id}
+                onClick={() => {
+                  fog.openChat(chat.id)
+                  setTimeout(() => fog.jumpTo(m.id), 50)
+                }}
+                className="flex w-full items-center gap-3 rounded-2xl p-2.5 text-left transition hover:bg-hover"
+              >
+                <Avatar id={chat.id} name={chatTitle(chat, people[chat.id])} src={chatAvatar(chat, people[chat.id])} size={46} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-2">
+                    <span className="truncate font-semibold">{chatTitle(chat, people[chat.id])}</span>
+                    <span className="ml-auto shrink-0 text-xs text-muted">{fmtListTime(m.ts)}</span>
+                  </div>
+                  <p className="truncate text-[15px] text-muted">
+                    {m.mine ? 'You: ' : chat.group ? `${personName(m.from ?? '', people[m.from ?? ''])}: ` : ''}
+                    <Highlight text={m.text || m.att?.name || ''} q={q} />
+                  </p>
+                </div>
+              </button>
+            ))}
+          </>
+        )}
+        {q && !list.length && !hits.length && <p className="px-6 pt-12 text-center text-muted">No chats or messages match “{filter}”.</p>}
+        {!q && !list.length && !archived.length && !requests.length && (
+          <div className="px-6 pt-16 text-center">
+            <div className="mx-auto grid size-20 place-items-center rounded-full bg-raised text-muted">
+              <Icon name="pencil" className="size-8" />
+            </div>
+            <p className="mt-4 font-semibold">No chats yet</p>
+            <p className="mt-1 text-sm text-muted">Start a chat with someone's username or account ID.</p>
+            <Button className="mt-5" onClick={onNew}>
+              Start a chat
+            </Button>
+          </div>
+        )}
+      </nav>
+      <button
+        onClick={onNew}
+        aria-label="New chat"
+        title="New chat"
+        className="absolute right-5 bottom-[max(1.25rem,env(safe-area-inset-bottom))] grid size-14 place-items-center rounded-full bg-lamp text-lamp-ink shadow-lg shadow-black/25 transition hover:scale-105 active:scale-95"
+      >
+        <Icon name="pencil" />
+      </button>
+    </>
+  )
+}
+
+function Highlight({ text, q }: { text: string; q: string }) {
+  const i = text.toLowerCase().indexOf(q)
+  if (i < 0) return <>{text}</>
+  const start = Math.max(0, i - 24)
+  return (
+    <>
+      {start > 0 && '…'}
+      {text.slice(start, i)}
+      <mark className="rounded bg-lamp/35 px-0.5 text-ink">{text.slice(i, i + q.length)}</mark>
+      {text.slice(i + q.length)}
+    </>
+  )
+}
+
+function ChatRow({ chat, active }: { chat: Chat; active: boolean }) {
+  const person = useFog((s) => s.people[chat.id])
+  const people = useFog((s) => s.people)
+  const [menu, setMenu] = useState<MenuAt | null>(null)
+  const [del, setDel] = useState(false)
+  const press = usePressMenu((at) => setMenu(at))
+  const last = chat.messages.at(-1)
+  const typing = chat.typing && chat.typing.until > Date.now() ? chat.typing : null
+  const title = chatTitle(chat, person)
+  const unread = chat.unread > 0 || !!chat.markedUnread
+  const muted = isMuted(chat)
+  const [muteDialog, setMuteDialog] = useState(false)
+  const who = last && !last.sys && chat.group ? (last.mine ? 'You' : personName(last.from ?? '', people[last.from ?? ''])) : null
+  return (
+    <>
+      <button
+        onClick={() => fog.openChat(chat.id)}
+        {...press}
+        className={`flex w-full items-center gap-3 rounded-2xl p-2.5 text-left transition select-none ${active ? 'bg-lamp/20 dark:bg-lamp/[0.13]' : 'hover:bg-hover'} ${menu ? 'bg-hover' : ''}`}
+      >
+        <Avatar id={chat.id} name={title} src={chatAvatar(chat, person)} size={54} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2">
+            {chat.group && <Icon name="users" className="size-4 shrink-0 self-center text-muted" />}
+            <span className="truncate font-semibold">{title}</span>
+            {muted && <Icon name="bellOff" className="size-4 shrink-0 self-center text-muted" />}
+            {chat.timer && <Icon name="timer" className="size-4 shrink-0 self-center text-muted" />}
+            <span className={`ml-auto flex shrink-0 items-center gap-1 text-xs ${unread && !muted ? 'text-lamp' : 'text-muted'}`}>
+              {last?.mine && !chat.draft && <Ticks status={msgStatus(chat, last)} />}
+              {last && fmtListTime(last.ts)}
+            </span>
+          </div>
+          <div className="mt-0.5 flex items-center gap-2">
+            <span className={`truncate text-[15px] ${typing ? 'text-lamp' : 'text-muted'}`}>
+              {typing ? (
+                chat.group ? `${personName(typing.by, people[typing.by])} is typing…` : 'typing…'
+              ) : chat.draft && !active ? (
+                <>
+                  <span className="text-danger">Draft: </span>
+                  {chat.draft}
+                </>
+              ) : last ? (
+                <>
+                  {who && <span className="text-ink/80">{who}: </span>}
+                  {snippet(last)}
+                </>
+              ) : (
+                'No messages yet'
+              )}
+            </span>
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              {chat.pinned && !unread && <Icon name="pin" className="size-4 text-muted" />}
+              {!!chat.mentions && <span className="pop grid size-5 place-items-center rounded-full bg-lamp text-xs font-bold text-lamp-ink">@</span>}
+              {unread && (
+                <span className={`pop grid h-5 min-w-5 place-items-center rounded-full px-1.5 text-xs font-bold ${muted ? 'bg-muted/40 text-ink' : 'bg-lamp text-lamp-ink'}`}>{chat.unread || ''}</span>
+              )}
+            </span>
+          </div>
+        </div>
+      </button>
+      {menu && (
+        <Menu at={menu} onClose={() => setMenu(null)}>
+          {!chat.archived && <MenuItem icon={chat.pinned ? 'unpin' : 'pin'} label={chat.pinned ? 'Unpin' : 'Pin to top'} onClick={() => (fog.pinChat(chat.id, !chat.pinned), setMenu(null))} />}
+          <MenuItem icon={unread ? 'check' : 'unread'} label={unread ? 'Mark as read' : 'Mark as unread'} onClick={() => (fog.markUnread(chat.id, !unread), setMenu(null))} />
+          {chat.id !== SAVED && <MenuItem icon={muted ? 'bell' : 'bellOff'} label={muted ? 'Unmute' : 'Mute'} onClick={() => (muted ? fog.muteChat(chat.id, 0) : setMuteDialog(true), setMenu(null))} />}
+          <MenuItem icon="archive" label={chat.archived ? 'Unarchive' : 'Archive'} onClick={() => (fog.archiveChat(chat.id, !chat.archived), setMenu(null), fog.toast(chat.archived ? 'Chat unarchived' : 'Chat archived'))} />
+          <MenuItem icon="trash" label={chat.group && !chat.group.left ? 'Leave and delete' : 'Delete chat'} danger onClick={() => (setDel(true), setMenu(null))} />
+        </Menu>
+      )}
+      {del && <DeleteChatDialog chat={chat} onClose={() => setDel(false)} />}
+      {muteDialog && <MuteDialog id={chat.id} onClose={() => setMuteDialog(false)} />}
+    </>
+  )
+}
+
+function Archived({ onClose, requests }: { onClose: () => void; requests?: boolean }) {
+  const chats = useFog((s) => s.chats)
+  const active = useFog((s) => s.active)
+  const list = sortedChats(chats).filter((c) => (requests ? c.request : c.archived && !c.request))
+  useEffect(() => {
+    if (!list.length) onClose()
+  }, [list.length])
+  return (
+    <Drawer title={requests ? 'Message requests' : 'Archived chats'} onClose={onClose}>
+      <p className="px-3 pb-2 text-sm text-muted">
+        {requests
+          ? "People you haven't chatted with yet. They can't see that you've read their messages, and their calls don't ring, until you accept."
+          : 'Archived chats stay here until a new message arrives. Muted chats stay archived.'}
+      </p>
+      {list.map((c) => (
+        <ChatRow key={c.id} chat={c} active={c.id === active} />
+      ))}
+    </Drawer>
+  )
+}
+
+function Choice<T>({ title, options, value, onPick, onClose, note }: { title: string; options: [T, string][]; value?: T; onPick: (v: T) => void; onClose: () => void; note?: string }) {
+  return (
+    <Dialog title={title} onClose={onClose} actions={<Button kind="ghost" onClick={onClose}>Cancel</Button>}>
+      {note && <p className="mb-2">{note}</p>}
+      <div className="-mx-2" role="radiogroup">
+        {options.map(([v, label]) => (
+          <button
+            key={String(v)}
+            role="radio"
+            aria-checked={v === value}
+            onClick={() => (onPick(v), onClose())}
+            className="flex w-full items-center gap-3 rounded-xl px-2 py-2.5 text-left text-ink transition hover:bg-hover"
+          >
+            <span className={`grid size-5 place-items-center rounded-full border-2 ${v === value ? 'border-lamp' : 'border-muted/50'}`}>{v === value && <span className="size-2.5 rounded-full bg-lamp" />}</span>
+            {label}
+          </button>
+        ))}
+      </div>
+    </Dialog>
+  )
+}
+
+function MuteDialog({ id, onClose }: { id: string; onClose: () => void }) {
+  const h = 3600_000
+  return (
+    <Choice
+      title="Mute notifications"
+      options={[
+        [h, 'For 1 hour'],
+        [8 * h, 'For 8 hours'],
+        [168 * h, 'For 1 week'],
+        [-1, 'Until I turn it back on'],
+      ]}
+      onPick={(d) => (fog.muteChat(id, d < 0 ? 8.64e15 : Date.now() + d), fog.toast('Notifications muted'))}
+      onClose={onClose}
+      note="Mentions of you still notify."
+    />
+  )
+}
+
+function TimerDialog({ id, value, onClose }: { id: string; value: number; onClose: () => void }) {
+  return (
+    <Choice
+      title="Disappearing messages"
+      note="New messages vanish for everyone in this chat after they've been read. Existing messages aren't affected."
+      options={TIMERS.map((t) => [t, timerLabel(t)] as [number, string])}
+      value={value}
+      onPick={(t) => t !== value && fog.setTimer(id, t)}
+      onClose={onClose}
+    />
+  )
+}
+
+function DeleteChatDialog({ chat, onClose }: { chat: Chat; onClose: () => void }) {
+  const group = chat.group && !chat.group.left
+  return (
+    <Dialog
+      title={group ? 'Leave group?' : 'Delete chat?'}
+      onClose={onClose}
+      actions={
+        <>
+          <Button kind="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button kind="danger" onClick={() => (fog.deleteChat(chat.id), onClose(), fog.toast(group ? 'You left the group' : 'Chat deleted'))}>
+            {group ? 'Leave and delete' : 'Delete chat'}
+          </Button>
+        </>
+      }
+    >
+      {group ? `You'll stop receiving messages from “${chatTitle(chat)}”, and the chat is deleted from this device.` : `This deletes your conversation with ${chatTitle(chat)} from this device. They keep their copy.`}
+    </Dialog>
+  )
+}
+
+// ---------- settings ----------
+function Settings({ onClose }: { onClose: () => void }) {
+  const me = useFog((s) => s.me)!
+  const profile = useFog((s) => s.profile)
+  const settings = useFog((s) => s.settings)
+  const [name, setName] = useState(profile.name)
+  const [showPhrase, setShowPhrase] = useState(false)
+  const [notif, setNotif] = useState(typeof Notification === 'undefined' ? 'denied' : Notification.permission)
+  const [dialog, setDialog] = useState<'none' | 'logout' | 'username' | 'share' | 'blocked' | 'lock'>('none')
+  const [lockOn, setLockOn] = useState(false)
+  useEffect(() => void db.lockEnabled().then(setLockOn), [dialog])
+  const blocked = useFog((s) => s.blocked)
+  const file = useRef<HTMLInputElement>(null)
+  const saveName = () => name.trim() !== profile.name && fog.setProfile({ name: name.trim() })
+  const display = profile.name || (me.username ? `@${me.username}` : 'You')
+  return (
+    <Drawer title="Settings" onClose={onClose}>
+      <div className="flex flex-col items-center pt-2 pb-4 text-center">
+        <button onClick={() => file.current?.click()} className="group relative rounded-full" aria-label="Change profile photo">
+          <Avatar id={me.id} name={display} src={profile.avatar} size={104} />
+          <span className="absolute inset-0 grid place-items-center rounded-full bg-black/40 text-white opacity-0 transition group-hover:opacity-100 group-focus-visible:opacity-100">
+            <Icon name="camera" className="size-8" />
+          </span>
+          <span className="absolute right-0 bottom-0 grid size-8 place-items-center rounded-full bg-lamp text-lamp-ink ring-4 ring-panel">
+            <Icon name="camera" className="size-4" />
+          </span>
+        </button>
+        <input
+          ref={file}
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={async (e) => {
+            const f = e.target.files?.[0]
+            e.target.value = ''
+            if (f) fog.setProfile({ avatar: await avatarFrom(f) })
+          }}
+        />
+        {profile.avatar && (
+          <button onClick={() => fog.setProfile({ avatar: undefined })} className="mt-2 text-sm text-muted hover:text-danger">
+            Remove photo
+          </button>
+        )}
+      </div>
+      <button onClick={() => (fog.openSaved(), onClose())} className="mb-3 flex w-full items-center gap-3 rounded-2xl bg-raised p-2.5 text-left transition hover:bg-hover">
+        <Avatar id={SAVED} size={40} />
+        <span className="min-w-0 flex-1">
+          <span className="block font-semibold">Saved Messages</span>
+          <span className="block text-sm text-muted">Notes and files for yourself</span>
+        </span>
+        <Icon name="next" className="size-5 text-muted" />
+      </button>
+      <div className="rounded-2xl bg-raised p-1">
+        <label className="flex items-center gap-4 rounded-xl px-3 py-2">
+          <Icon name="user" className="size-6 shrink-0 text-muted" />
+          <div className="min-w-0 flex-1">
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value.slice(0, 64))}
+              onBlur={saveName}
+              onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+              placeholder="Add your name"
+              className="w-full bg-transparent text-base text-ink outline-none placeholder:text-muted"
+            />
+            <p className="text-sm text-muted">Name</p>
+          </div>
+        </label>
+        <Row icon="at" title={me.username ? `@${me.username}` : 'Set a username'} sub="Username" onClick={() => setDialog('username')} />
+        <Row icon="key" title={<span className="font-mono text-sm">{shortId(me.id)}</span>} sub="Account ID. Tap to copy." onClick={() => copy(me.id, 'Account ID copied')} />
+        <Row icon="qr" title="QR code and invite link" sub="Let people add you in one tap" onClick={() => setDialog('share')} />
+      </div>
+      <p className="mt-2 px-3 text-sm text-muted">Your name and photo are end-to-end encrypted and only shared with people you message.</p>
+
+      <Section title="Appearance">
+        <div className="px-3 py-2">
+          <div className="grid grid-cols-3 gap-1 rounded-xl bg-raised p-1" role="radiogroup" aria-label="Theme">
+            {(['system', 'light', 'dark'] as const).map((t) => (
+              <button
+                key={t}
+                role="radio"
+                aria-checked={settings.theme === t}
+                onClick={() => fog.updateSettings({ theme: t })}
+                className={`h-9 rounded-lg text-sm font-medium capitalize transition ${settings.theme === t ? 'bg-panel shadow-sm dark:bg-hover' : 'text-muted hover:text-ink'}`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <label className="mt-4 flex items-center gap-3">
+            <span className="text-sm text-muted">A</span>
+            <input
+              type="range"
+              min={14}
+              max={20}
+              value={settings.textSize}
+              onChange={(e) => fog.updateSettings({ textSize: Number(e.target.value) })}
+              className="flex-1 accent-[var(--lamp)]"
+              aria-label="Message text size"
+            />
+            <span className="text-lg text-muted">A</span>
+          </label>
+          <div className="fogbank mt-3 flex flex-col gap-1.5 rounded-2xl px-5 py-3">
+            <span className="text-msg tail-in relative self-start rounded-[18px] rounded-bl-[4px] bg-in px-3 py-1.5">Is this text size comfortable?</span>
+            <span className="text-msg tail-out relative self-end rounded-[18px] rounded-br-[4px] bg-out px-3 py-1.5 text-out-ink">Just right 👌</span>
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Notifications">
+        <Row
+          icon="bell"
+          title="Desktop notifications"
+          sub={notif === 'granted' ? 'On while Fog is in the background' : notif === 'denied' ? 'Blocked in your browser settings' : 'Off'}
+          onClick={notif === 'default' ? () => Notification.requestPermission().then(setNotif) : undefined}
+          right={notif === 'default' ? <span className="text-sm font-semibold text-lamp">Turn on</span> : undefined}
+        />
+        <Row icon="volume" title="Sounds" sub="Play a sound for new messages" right={<Toggle label="Sounds" on={settings.sounds} onChange={(v) => fog.updateSettings({ sounds: v })} />} />
+      </Section>
+
+      <Section title="Privacy">
+        <Row icon="check" title="Read receipts" sub="Let people see when you've read their messages" right={<Toggle label="Read receipts" on={settings.readReceipts} onChange={(v) => fog.updateSettings({ readReceipts: v })} />} />
+        <Row icon="pencil" title="Typing indicators" sub="Show when you're typing" right={<Toggle label="Typing indicators" on={settings.typing} onChange={(v) => fog.updateSettings({ typing: v })} />} />
+        <Row icon="lockOn" title="App lock" sub={lockOn ? 'On: passcode required to open Fog' : 'Off'} onClick={() => setDialog('lock')} />
+        <Row icon="block" title="Blocked accounts" sub={blocked.length ? `${blocked.length} blocked` : 'None'} onClick={() => setDialog('blocked')} />
+        <Row
+          icon="link"
+          title="Link previews"
+          sub="When you type a link, your Fog server fetches its preview. Recipients get it inside the encrypted message."
+          right={<Toggle label="Link previews" on={settings.linkPreviews} onChange={(v) => fog.updateSettings({ linkPreviews: v })} />}
+        />
+        <Row
+          icon="phone"
+          title="Relay all calls"
+          sub="Route calls through your Fog server so the other person never sees your IP address. Calls may be slightly slower."
+          right={<Toggle label="Relay all calls" on={settings.relayCalls} onChange={(v) => fog.updateSettings({ relayCalls: v })} />}
+        />
+      </Section>
+
+      <Section title="Recovery phrase">
+        <p className="px-3 text-sm text-muted">The only way back into your account on a new device. Never share it.</p>
+        <div className="relative mx-3 mt-3">
+          <p className={`rounded-2xl bg-raised p-4 text-[15px] leading-relaxed ${showPhrase ? '' : 'fogged'}`}>{fog.phrase()}</p>
+          {!showPhrase && (
+            <button onClick={() => setShowPhrase(true)} className="absolute inset-0 grid place-items-center font-semibold">
+              <span className="flex items-center gap-2 rounded-full bg-panel px-4 py-2 shadow">
+                <Icon name="eye" className="size-5" /> Show phrase
+              </span>
+            </button>
+          )}
+        </div>
+      </Section>
+
+      <div className="mt-6">
+        <Row icon="out" title={<span className="text-danger">Log out</span>} onClick={() => setDialog('logout')} />
+      </div>
+
+      {dialog === 'logout' && (
+        <Dialog
+          title="Log out of Fog?"
+          onClose={() => setDialog('none')}
+          actions={
+            <>
+              <Button kind="ghost" onClick={() => setDialog('none')}>
+                Cancel
+              </Button>
+              <Button kind="danger" onClick={fog.logout}>
+                Log out
+              </Button>
+            </>
+          }
+        >
+          This erases your keys and messages from this device. You need your recovery phrase to log back in.
+        </Dialog>
+      )}
+      {dialog === 'username' && <UsernameDialog current={me.username ?? ''} onClose={() => setDialog('none')} />}
+      {dialog === 'share' && <ShareDialog onClose={() => setDialog('none')} />}
+      {dialog === 'lock' && <AppLockDialog onClose={() => setDialog('none')} />}
+      {dialog === 'blocked' && (
+        <Dialog title="Blocked accounts" onClose={() => setDialog('none')} actions={<Button onClick={() => setDialog('none')}>Done</Button>}>
+          {blocked.length ? (
+            <div className="-mx-2 mt-1">
+              {blocked.map((id) => (
+                <PersonRow key={id} id={id} right={<Button kind="soft" className="h-9 px-3 text-sm" onClick={() => fog.unblock(id)}>Unblock</Button>} />
+              ))}
+            </div>
+          ) : (
+            "You haven't blocked anyone. Blocked people can't message or call you, and they aren't told."
+          )}
+        </Dialog>
+      )}
+    </Drawer>
+  )
+}
+
+function UsernameDialog({ current, onClose }: { current: string; onClose: () => void }) {
+  const u = useUsername(current)
+  const [busy, setBusy] = useState(false)
+  const save = async () => {
+    setBusy(true)
+    try {
+      await fog.claimUsername(u.name)
+      fog.toast(`You're now @${u.name}`)
+      onClose()
+    } catch {
+      u.setStatus('taken')
+      setBusy(false)
+    }
+  }
+  return (
+    <Dialog
+      title="Username"
+      onClose={onClose}
+      actions={
+        <>
+          <Button kind="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={save} disabled={u.status !== 'available' || busy}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className="mt-2">{u.field}</div>
+    </Dialog>
+  )
+}
+
+// ---------- new chat / group ----------
+/** Look someone up by @username or account id as you type. */
+function usePeerSearch(q: string) {
+  const [res, setRes] = useState<{ id: string; username: string | null } | 'none' | 'loading' | null>(null)
+  useEffect(() => {
+    if (q.trim().replace(/^@/, '').length < 3) return setRes(null)
+    setRes('loading')
+    const t = setTimeout(() => fog.findPeer(q).then(setRes, () => setRes('none')), 350)
+    return () => clearTimeout(t)
+  }, [q])
+  return res
+}
+
+function PersonRow({ id, sub, onClick, right }: { id: string; sub?: string; onClick?: () => void; right?: ReactNode }) {
+  const p = useFog((s) => s.people[id])
+  const Tag = onClick ? 'button' : 'div'
+  return (
+    <Tag onClick={onClick} className={`fade-in flex w-full items-center gap-3 rounded-2xl p-2.5 text-left ${onClick ? 'transition hover:bg-hover' : ''}`}>
+      <Avatar id={id} name={personName(id, p)} src={p?.avatar} size={46} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-semibold">{personName(id, p)}</p>
+        <p className="truncate text-sm text-muted">{sub ?? (p?.name && p.username ? `@${p.username}` : shortId(id))}</p>
+      </div>
+      {right}
+    </Tag>
+  )
+}
+
+function NewChat({ onClose, onGroup }: { onClose: () => void; onGroup: () => void }) {
+  const me = useFog((s) => s.me)!
+  const [q, setQ] = useState('')
+  const [dialog, setDialog] = useState<'none' | 'scan' | 'share'>('none')
+  const res = usePeerSearch(q)
+  return (
+    <Drawer title="New chat" onClose={onClose}>
+      {(close) => {
+        const found = typeof res === 'object' && res ? res : null
+        return (
+          <>
+            <form onSubmit={(e) => (e.preventDefault(), found && found.id !== me.id && (fog.startChat(found.id), close()))}>
+              <div className="flex h-12 items-center gap-2 rounded-xl border border-line bg-raised px-3 focus-within:border-lamp">
+                <Icon name="search" className="size-5 text-muted" />
+                <input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  autoFocus
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  placeholder="Username or account ID"
+                  className="w-full bg-transparent text-base text-ink outline-none placeholder:text-muted"
+                />
+              </div>
+            </form>
+            <div className="mt-3">
+              {res === 'loading' && (
+                <p className="flex items-center gap-2 px-3 text-sm text-muted">
+                  <Spinner /> Searching
+                </p>
+              )}
+              {res === 'none' && <p className="px-3 text-sm text-muted">Nobody found with that username or account ID.</p>}
+              {found && (found.id === me.id ? <p className="px-3 text-sm text-muted">That's your own account.</p> : <PersonRow id={found.id} onClick={() => (fog.startChat(found.id), close())} />)}
+            </div>
+            {res === null && (
+              <>
+                {(
+                  [
+                    ['users', 'New group', onGroup],
+                    ...(canScan ? [['qr', 'Scan a QR code', () => setDialog('scan')]] : []),
+                    ['link', 'Share my invite link', () => setDialog('share')],
+                  ] as [string, string, () => void][]
+                ).map(([icon, label, fn]) => (
+                  <button key={label} onClick={fn} className="mt-1 flex w-full items-center gap-4 rounded-2xl p-2.5 text-left transition hover:bg-hover">
+                    <span className="grid size-[46px] place-items-center rounded-full bg-lamp/20 text-lamp">
+                      <Icon name={icon} />
+                    </span>
+                    <span className="font-semibold">{label}</span>
+                  </button>
+                ))}
+                <div className="mt-4 rounded-2xl bg-raised p-4">
+                  <p className="font-semibold">Invite someone</p>
+                  <p className="mt-1 text-sm text-muted">Share your {me.username ? 'username' : 'account ID'} so people can start a chat with you.</p>
+                  <button
+                    onClick={() => copy(me.username ? `@${me.username}` : me.id, me.username ? 'Username copied' : 'Account ID copied')}
+                    className="mt-3 flex w-full items-center gap-2 rounded-xl bg-panel px-3 py-2.5 text-left transition hover:bg-hover"
+                  >
+                    <span className="min-w-0 flex-1 truncate font-medium">{me.username ? `@${me.username}` : me.id}</span>
+                    <Icon name="copy" className="size-5 text-muted" />
+                  </button>
+                </div>
+              </>
+            )}
+            {dialog === 'scan' && (
+              <ScanDialog
+                onClose={() => setDialog('none')}
+                onCode={async (raw) => {
+                  const id = /#add=([A-Za-z0-9_-]{43})/.exec(raw)?.[1]
+                  if (!id) return "That isn't a Fog invite code."
+                  try {
+                    await fog.findPeer(id)
+                    fog.startChat(id)
+                    close()
+                    return null
+                  } catch {
+                    return "That code doesn't match any Fog account."
+                  }
+                }}
+              />
+            )}
+            {dialog === 'share' && <ShareDialog onClose={() => setDialog('none')} />}
+          </>
+        )
+      }}
+    </Drawer>
+  )
+}
+
+const canScan = typeof window !== 'undefined' && 'BarcodeDetector' in window
+
+/** Your account as a QR code + invite link. The link only contains your public account id. */
+function ShareDialog({ onClose }: { onClose: () => void }) {
+  const me = useFog((s) => s.me)!
+  const profile = useFog((s) => s.profile)
+  const link = fog.inviteLink()
+  const qr = useMemo(() => `data:image/svg+xml;utf8,${encodeURIComponent(renderSVG(link, { ecc: 'H', border: 2, blackColor: '#15202b', whiteColor: '#ffffff' }))}`, [link])
+  return (
+    <Dialog
+      title="Add me on Fog"
+      onClose={onClose}
+      actions={
+        <>
+          {navigator.share && (
+            <Button kind="ghost" onClick={() => navigator.share({ title: 'Add me on Fog', url: link }).catch(() => {})}>
+              Share
+            </Button>
+          )}
+          <Button onClick={() => copy(link, 'Invite link copied')}>Copy link</Button>
+        </>
+      }
+    >
+      <div className="mt-2 flex flex-col items-center">
+        <div className="relative rounded-3xl bg-white p-3 shadow-inner">
+          <img src={qr} alt="QR code for your invite link" className="size-56" />
+          <img src="/icon.svg" alt="" className="absolute top-1/2 left-1/2 size-12 -translate-x-1/2 -translate-y-1/2 rounded-xl ring-4 ring-white" />
+        </div>
+        <p className="mt-3 font-semibold text-ink">{profile.name || (me.username ? `@${me.username}` : shortId(me.id))}</p>
+        {me.username && profile.name && <p className="text-sm">@{me.username}</p>}
+        <p className="mt-2 text-center text-sm">Scanning this opens a chat with you. It only contains your public account ID.</p>
+      </div>
+    </Dialog>
+  )
+}
+
+/** Camera QR scanner. `onCode` returns an error to show, or null when the code was handled. */
+function ScanDialog({ onClose, onCode, title = 'Scan a QR code', hint = 'Point your camera at a Fog QR code.' }: { onClose: () => void; onCode: (raw: string) => Promise<string | null>; title?: string; hint?: string }) {
+  const video = useRef<HTMLVideoElement>(null)
+  const [err, setErr] = useState<string | null>(null)
+  useEffect(() => {
+    let stream: MediaStream | undefined
+    let stop = false
+    const detector = new (window as any).BarcodeDetector({ formats: ['qr_code'] })
+    ;(async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+        if (stop) return stream.getTracks().forEach((t) => t.stop())
+        video.current!.srcObject = stream
+        await video.current!.play()
+        while (!stop) {
+          const codes = await detector.detect(video.current).catch(() => [])
+          if (codes[0]?.rawValue) {
+            stop = true
+            setErr(await onCode(codes[0].rawValue))
+            break
+          }
+          await new Promise((r) => setTimeout(r, 250))
+        }
+      } catch {
+        setErr('Fog needs camera access to scan a code.')
+      }
+    })()
+    return () => {
+      stop = true
+      stream?.getTracks().forEach((t) => t.stop())
+    }
+  }, [])
+  return (
+    <Dialog title={title} onClose={onClose} actions={<Button kind="ghost" onClick={onClose}>Cancel</Button>}>
+      <div className="relative mt-2 aspect-square overflow-hidden rounded-3xl bg-black">
+        <video ref={video} playsInline muted className="size-full object-cover" />
+        <div className="pointer-events-none absolute inset-10 rounded-3xl border-4 border-white/80 shadow-[0_0_0_999px_rgba(0,0,0,0.35)]" />
+      </div>
+      <p className={`mt-3 text-center text-sm ${err ? 'text-danger' : ''}`}>{err ?? hint}</p>
+    </Dialog>
+  )
+}
+
+/** Pick people: your existing contacts plus anyone found by username or account id. */
+function PeoplePicker({ picked, setPicked, exclude = [] }: { picked: string[]; setPicked: (f: (p: string[]) => string[]) => void; exclude?: string[] }) {
+  const chats = useFog((s) => s.chats)
+  const people = useFog((s) => s.people)
+  const me = useFog((s) => s.me)!
+  const [q, setQ] = useState('')
+  const res = usePeerSearch(q)
+  const contacts = Object.values(chats)
+    .filter((c) => !c.group && !exclude.includes(c.id))
+    .map((c) => c.id)
+    .filter((id) => !q || personName(id, people[id]).toLowerCase().includes(q.toLowerCase().replace(/^@/, '')))
+  const found = typeof res === 'object' && res && res.id !== me.id && !exclude.includes(res.id) && !contacts.includes(res.id) ? res.id : null
+  const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))
+  const check = (id: string) => (
+    <span className={`grid size-6 place-items-center rounded-full border-2 transition ${picked.includes(id) ? 'border-lamp bg-lamp text-lamp-ink' : 'border-muted/50'}`}>{picked.includes(id) && <Icon name="check" className="size-4" />}</span>
+  )
+  return (
+    <>
+      {picked.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {picked.map((id) => (
+            <button key={id} onClick={() => toggle(id)} className="pop flex items-center gap-1.5 rounded-full bg-lamp/20 py-1 pr-2.5 pl-1 text-sm font-medium" aria-label={`Remove ${personName(id, people[id])}`}>
+              <Avatar id={id} name={personName(id, people[id])} src={people[id]?.avatar} size={22} />
+              {personName(id, people[id])}
+              <Icon name="close" className="size-3.5 text-muted" />
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex h-12 items-center gap-2 rounded-xl border border-line bg-raised px-3 focus-within:border-lamp">
+        <Icon name="search" className="size-5 text-muted" />
+        <input value={q} onChange={(e) => setQ(e.target.value)} autoFocus spellCheck={false} autoCapitalize="none" placeholder="Search contacts or a username" className="w-full bg-transparent text-base text-ink outline-none placeholder:text-muted" />
+      </div>
+      <div className="mt-2">
+        {found && <PersonRow id={found} onClick={() => (toggle(found), setQ(''))} right={check(found)} />}
+        {contacts.map((id) => (
+          <PersonRow key={id} id={id} onClick={() => toggle(id)} right={check(id)} />
+        ))}
+        {!contacts.length && !found && <p className="px-3 py-4 text-sm text-muted">{res === 'loading' ? 'Searching…' : 'Type a username or paste an account ID to add someone.'}</p>}
+      </div>
+    </>
+  )
+}
+
+function NewGroup({ onClose }: { onClose: () => void }) {
+  const [picked, setPicked] = useState<string[]>([])
+  const [step, setStep] = useState<1 | 2>(1)
+  const [name, setName] = useState('')
+  const [avatar, setAvatar] = useState<string>()
+  const file = useRef<HTMLInputElement>(null)
+  return (
+    <Drawer
+      title={step === 1 ? 'Add members' : 'New group'}
+      onClose={onClose}
+      actions={
+        step === 1 && (
+          <Button className="h-9 px-4 text-sm" disabled={!picked.length} onClick={() => setStep(2)}>
+            Next
+          </Button>
+        )
+      }
+    >
+      {(close) =>
+        step === 1 ? (
+          <PeoplePicker picked={picked} setPicked={setPicked} />
+        ) : (
+          <div className="fade-in">
+            <div className="flex items-center gap-4 py-2">
+              <button onClick={() => file.current?.click()} aria-label="Group photo" className="relative grid size-20 shrink-0 place-items-center overflow-hidden rounded-full bg-lamp/20 text-lamp">
+                {avatar ? <img src={avatar} alt="" className="size-full object-cover" /> : <Icon name="camera" className="size-8" />}
+              </button>
+              <input ref={file} type="file" accept="image/*" hidden onChange={async (e) => e.target.files?.[0] && setAvatar(await avatarFrom(e.target.files[0]))} />
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value.slice(0, 64))}
+                autoFocus
+                placeholder="Group name"
+                onKeyDown={(e) => e.key === 'Enter' && name.trim() && (fog.createGroup(name.trim(), picked, avatar), close())}
+                className="h-12 min-w-0 flex-1 border-b-2 border-line bg-transparent text-lg text-ink outline-none focus:border-lamp"
+              />
+            </div>
+            <p className="mt-4 px-1 text-sm font-semibold text-lamp">{picked.length + 1} members</p>
+            {picked.map((id) => (
+              <PersonRow key={id} id={id} />
+            ))}
+            <Button className="mt-6 w-full" disabled={!name.trim()} onClick={() => (fog.createGroup(name.trim(), picked, avatar), close())}>
+              Create group
+            </Button>
+            <p className="mt-3 text-center text-xs text-muted">Every message is end-to-end encrypted to each member separately.</p>
+          </div>
+        )
+      }
+    </Drawer>
+  )
+}
+
+// ---------- chat info ----------
+function ChatInfo({ id, onClose }: { id: string; onClose: () => void }) {
+  const chat = useFog((s) => s.chats[id])
+  const person = useFog((s) => s.people[id])
+  const me = useFog((s) => s.me)!
+  const [dialog, setDialog] = useState<'none' | 'delete' | 'add' | 'leave' | 'mute' | 'timer' | 'block' | 'report' | 'scan'>('none')
+  useFog((s) => s.blocked)
+  const [menu, setMenu] = useState<{ at: MenuAt; id: string } | null>(null)
+  const [name, setName] = useState(chat?.name ?? '')
+  const file = useRef<HTMLInputElement>(null)
+  if (!chat) return null
+  const g = chat.group
+  const owner = g?.owner === me.id && !g.left
+  const title = chatTitle(chat, person)
+  const media = chat.messages.filter((m) => m.att && (m.att.kind === 'photo' || m.att.kind === 'video')).reverse()
+  const docs = chat.messages.filter((m) => m.att && (m.att.kind === 'file' || m.att.kind === 'audio')).reverse()
+  const saved = id === SAVED
+  const sn = g || saved ? [] : (fog.safetyNumber(id).match(/.{5}/g) ?? [])
+  return (
+    <Drawer title={g ? 'Group info' : 'Info'} onClose={onClose} side="right">
+      <div className="flex flex-col items-center pt-2 pb-6 text-center">
+        <button onClick={() => owner && file.current?.click()} className={`group relative rounded-full ${owner ? '' : 'cursor-default'}`} aria-label={owner ? 'Change group photo' : undefined} tabIndex={owner ? 0 : -1}>
+          <Avatar id={id} name={title} src={chatAvatar(chat, person)} size={104} />
+          {owner && (
+            <span className="absolute inset-0 grid place-items-center rounded-full bg-black/40 text-white opacity-0 transition group-hover:opacity-100">
+              <Icon name="camera" className="size-8" />
+            </span>
+          )}
+        </button>
+        <input ref={file} type="file" accept="image/*" hidden onChange={async (e) => e.target.files?.[0] && fog.updateGroup(id, { avatar: await avatarFrom(e.target.files[0]) })} />
+        {owner ? (
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value.slice(0, 64))}
+            onBlur={() => name.trim() && name.trim() !== chat.name && fog.updateGroup(id, { name: name.trim() })}
+            onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+            aria-label="Group name"
+            className="mt-3 w-full rounded-lg bg-transparent text-center text-xl font-semibold outline-none hover:bg-hover focus:bg-raised"
+          />
+        ) : (
+          <p className="mt-3 flex items-center gap-1.5 text-xl font-semibold">
+            {title}
+            {person?.verified && <Icon name="shield" className="size-5 text-emerald-500" />}
+          </p>
+        )}
+        <p className="text-muted">{g ? `${g.members.length} members` : person?.name && person.username ? `@${person.username}` : ''}</p>
+      </div>
+
+      {!saved && (!g || !g.left) && (
+        <div className="mb-3 rounded-2xl bg-raised p-1">
+          <Row
+            icon={isMuted(chat) ? 'bellOff' : 'bell'}
+            title="Notifications"
+            sub={isMuted(chat) ? (chat.muted! > 8e15 ? 'Muted' : `Muted until ${new Date(chat.muted!).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}`) : 'On'}
+            right={<Toggle label="Notifications" on={!isMuted(chat)} onChange={(on) => (on ? fog.muteChat(id, 0) : setDialog('mute'))} />}
+          />
+          <Row icon="timer" title="Disappearing messages" sub={timerLabel(chat.timer)} onClick={() => setDialog('timer')} />
+        </div>
+      )}
+      {!g && !saved && (
+        <div className="rounded-2xl bg-raised p-1">
+          {person?.username && <Row icon="at" title={`@${person.username}`} sub="Username. Tap to copy." onClick={() => copy(`@${person.username}`, 'Username copied')} />}
+          <Row icon="key" title={<span className="font-mono text-sm">{shortId(id)}</span>} sub="Account ID. Tap to copy." onClick={() => copy(id, 'Account ID copied')} />
+        </div>
+      )}
+
+      {g && (
+        <Section title={`${g.members.length} members`}>
+          {owner && (
+            <button onClick={() => setDialog('add')} className="flex w-full items-center gap-3 rounded-2xl p-2.5 text-left text-lamp transition hover:bg-hover">
+              <span className="grid size-[46px] place-items-center rounded-full bg-lamp/15">
+                <Icon name="plus" />
+              </span>
+              <span className="font-semibold">Add members</span>
+            </button>
+          )}
+          {g.members.map((m) =>
+            m === me.id ? (
+              <PersonRow key={m} id={m} sub={g.owner === m ? 'Owner' : 'Member'} />
+            ) : (
+              <PersonRow
+                key={m}
+                id={m}
+                sub={g.owner === m ? 'Owner' : undefined}
+                onClick={() => (fog.startChat(m), onClose())}
+                right={
+                  owner && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label="Member options"
+                      onClick={(e) => (e.stopPropagation(), setMenu({ at: { x: e.clientX, y: e.clientY }, id: m }))}
+                      className="grid size-9 place-items-center rounded-full text-muted hover:bg-hover"
+                    >
+                      <Icon name="menu" className="size-5" />
+                    </span>
+                  )
+                }
+              />
+            ),
+          )}
+        </Section>
+      )}
+
+      {media.length > 0 && (
+        <Section title="Photos and videos">
+          <div className="grid grid-cols-3 gap-1 overflow-hidden rounded-2xl">
+            {media.slice(0, 15).map((m) => (
+              <Thumb key={m.id} m={m} />
+            ))}
+          </div>
+        </Section>
+      )}
+      {docs.length > 0 && (
+        <Section title="Files">
+          {docs.slice(0, 20).map((m) => (
+            <button key={m.id} onClick={() => fog.jumpTo(m.id)} className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition hover:bg-hover">
+              <span className="grid size-10 place-items-center rounded-lg bg-slate-500 text-white">
+                <Icon name="file" className="size-5" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium">{m.att!.name}</span>
+                <span className="text-xs text-muted">{fmtListTime(m.ts)}</span>
+              </span>
+            </button>
+          ))}
+        </Section>
+      )}
+
+      {!g && !saved && (
+        <Section title="Safety number">
+          <p className="px-3 text-sm text-muted">
+            {person?.verified
+              ? "You've verified that this is really them. Their keys can't change without this chat becoming a different account."
+              : 'Scan their code, or compare the numbers in person or on a call. A match proves nobody is impersonating them.'}
+          </p>
+          <div className="mx-3 mt-3 flex items-center gap-4 rounded-2xl bg-raised p-4">
+            <img src={`data:image/svg+xml;utf8,${encodeURIComponent(renderSVG(fog.safetyQr(id), { border: 1, blackColor: '#15202b', whiteColor: '#ffffff' }))}`} alt="Your safety code for this chat" className="size-28 shrink-0 rounded-lg bg-white p-1" />
+            <div className="grid flex-1 grid-cols-3 gap-x-2 gap-y-1 font-mono text-sm tabular-nums">
+              {sn.map((s, i) => (
+                <span key={i}>{s}</span>
+              ))}
+            </div>
+          </div>
+          {canScan && <Row icon="qr" title="Scan their code" onClick={() => setDialog('scan')} />}
+          <Row
+            icon="shield"
+            title={person?.verified ? 'Clear verification' : 'Mark as verified'}
+            sub={person?.verified ? 'Verified' : 'Only after comparing the numbers'}
+            onClick={() => fog.setVerified(id, !person?.verified)}
+          />
+        </Section>
+      )}
+
+      <div className="mt-6">
+        <Row icon={chat.pinned ? 'unpin' : 'pin'} title={chat.pinned ? 'Unpin chat' : 'Pin chat'} onClick={() => fog.pinChat(id, !chat.pinned)} />
+        {g && !g.left && <Row icon="out" title={<span className="text-danger">Leave group</span>} onClick={() => setDialog('leave')} />}
+        {!g && !saved && (
+          <>
+            <Row icon="block" title={<span className="text-danger">{fog.isBlocked(id) ? 'Unblock' : 'Block'}</span>} onClick={() => (fog.isBlocked(id) ? fog.unblock(id) : setDialog('block'))} />
+            <Row icon="flag" title={<span className="text-danger">Report and block</span>} onClick={() => setDialog('report')} />
+          </>
+        )}
+        <Row icon="trash" title={<span className="text-danger">Delete chat</span>} onClick={() => setDialog('delete')} />
+      </div>
+
+      {menu && (
+        <Menu at={menu.at} onClose={() => setMenu(null)}>
+          <MenuItem icon="send" label="Message" onClick={() => (fog.startChat(menu.id), setMenu(null), onClose())} />
+          <MenuItem icon="trash" label="Remove from group" danger onClick={() => (fog.updateGroup(id, { remove: [menu.id] }), setMenu(null))} />
+        </Menu>
+      )}
+      {dialog === 'delete' && <DeleteChatDialog chat={chat} onClose={() => setDialog('none')} />}
+      {dialog === 'mute' && <MuteDialog id={id} onClose={() => setDialog('none')} />}
+      {dialog === 'scan' && (
+        <ScanDialog
+          title="Scan their safety code"
+          hint="Ask them to open this chat's info and show you their code."
+          onClose={() => setDialog('none')}
+          onCode={async (raw) => {
+            if (fog.verifySafetyCode(id, raw)) {
+              fog.toast(`${title} is verified`)
+              setDialog('none')
+              return null
+            }
+            return "Codes don't match. You may not be talking to who you think, or they scanned a different chat."
+          }}
+        />
+      )}
+      {(dialog === 'block' || dialog === 'report') && (
+        <Dialog
+          title={dialog === 'block' ? `Block ${title}?` : `Report ${title}?`}
+          onClose={() => setDialog('none')}
+          actions={
+            <>
+              <Button kind="ghost" onClick={() => setDialog('none')}>
+                Cancel
+              </Button>
+              <Button kind="danger" onClick={() => (dialog === 'block' ? fog.block(id) : fog.report(id), setDialog('none'))}>
+                {dialog === 'block' ? 'Block' : 'Report and block'}
+              </Button>
+            </>
+          }
+        >
+          {dialog === 'block'
+            ? "They won't be able to message or call you, and they won't be told you blocked them."
+            : 'Fog is told this account is sending spam or abuse. Your messages stay end-to-end encrypted, so nothing you wrote is shared. They are also blocked.'}
+        </Dialog>
+      )}
+      {dialog === 'timer' && <TimerDialog id={id} value={chat.timer ?? 0} onClose={() => setDialog('none')} />}
+      {dialog === 'leave' && (
+        <Dialog
+          title="Leave group?"
+          onClose={() => setDialog('none')}
+          actions={
+            <>
+              <Button kind="ghost" onClick={() => setDialog('none')}>
+                Cancel
+              </Button>
+              <Button kind="danger" onClick={() => (fog.leaveGroup(id), setDialog('none'))}>
+                Leave
+              </Button>
+            </>
+          }
+        >
+          You'll stop receiving messages from “{title}”. The chat history stays on this device.
+        </Dialog>
+      )}
+      {dialog === 'add' && g && <AddMembers id={id} exclude={g.members} onClose={() => setDialog('none')} />}
+    </Drawer>
+  )
+}
+
+function AddMembers({ id, exclude, onClose }: { id: string; exclude: string[]; onClose: () => void }) {
+  const [picked, setPicked] = useState<string[]>([])
+  return (
+    <Dialog
+      title="Add members"
+      onClose={onClose}
+      actions={
+        <>
+          <Button kind="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button disabled={!picked.length} onClick={() => (fog.updateGroup(id, { add: picked }), onClose())}>
+            Add{picked.length > 1 ? ` ${picked.length}` : ''}
+          </Button>
+        </>
+      }
+    >
+      <div className="scroll-thin mt-2 max-h-[55vh] overflow-y-auto text-ink">
+        <PeoplePicker picked={picked} setPicked={setPicked} exclude={exclude} />
+      </div>
+    </Dialog>
+  )
+}
+
+function Thumb({ m }: { m: Msg }) {
+  const a = m.att!
+  const url = useLocalUrl(a.lid)
+  useEffect(() => {
+    if (a.kind === 'photo' && !url) download(a)
+  }, [a.lid])
+  return (
+    <button onClick={() => fog.jumpTo(m.id)} className="relative aspect-square overflow-hidden bg-black/10" aria-label="Show in chat">
+      {a.thumb && <img src={a.thumb} alt="" className="absolute inset-0 size-full object-cover" />}
+      {url && a.kind === 'photo' && <img src={url} alt="" className="fade-in absolute inset-0 size-full object-cover" />}
+      {a.kind === 'video' && (
+        <span className="absolute bottom-1 left-1 rounded bg-black/50 px-1 text-[11px] font-medium text-white">▶</span>
+      )}
+    </button>
+  )
+}

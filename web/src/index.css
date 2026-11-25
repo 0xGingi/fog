@@ -1,0 +1,317 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/onest';
+
+/* Theme is chosen in JS (System / Light / Dark) and written to <html data-theme>. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* Fog palette. Light: cool mist greys with sodium-lamp amber (fog lights are amber).
+   Dark: blue-slate night fog; the amber becomes a deep lamp-lit bronze so outgoing bubbles glow, not glare. */
+:root {
+  --bg: #e9edf1;
+  --panel: #ffffff;
+  --raised: #f1f4f7;
+  --hover: #eef1f5;
+  --ink: #15202b;
+  --muted: #687482;
+  --line: #e1e6eb;
+  --lamp: #e8a325;
+  --lamp-ink: #2a1d04;
+  --out: #fbe4a9;
+  --out-ink: #2a1d04;
+  --out-meta: #8a6a26;
+  --out-accent: #9a6f12;
+  --tick: #2a1d04;
+  --in: #ffffff;
+  --chat: #dfe5eb;
+  --haze: rgba(255, 255, 255, 0.7);
+  --pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='360' height='360' fill='none' stroke='%23000' stroke-opacity='.045' stroke-width='1.2' stroke-linecap='round'%3E%3Cpath d='M-10 40c40-14 80 14 120 0s80-14 120 0 80 14 140 0'/%3E%3Cpath d='M30 96c34-10 68 10 102 0s68-10 102 0'/%3E%3Cpath d='M-10 150c50-16 100 16 150 0s100-16 150 0 60 10 80 0'/%3E%3Cpath d='M90 212c30-9 60 9 90 0s60-9 90 0'/%3E%3Cpath d='M-10 268c44-14 88 14 132 0s88-14 132 0 66 12 110 0'/%3E%3Cpath d='M20 326c36-10 72 10 108 0s72-10 108 0'/%3E%3C/svg%3E");
+  --danger: #c8412f;
+  --scrim: rgba(12, 18, 24, 0.45);
+  --msg: 16px;
+}
+/* Before JS sets data-theme, follow the system so dark users never see a white flash. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #101820;
+    --panel: #17202a;
+    --ink: #e6ecf2;
+    --chat: #0e151c;
+  }
+}
+:root[data-theme='dark'] {
+  --bg: #101820;
+  --panel: #17202a;
+  --raised: #202b37;
+  --hover: #1d2733;
+  --ink: #e6ecf2;
+  --muted: #8d9bab;
+  --line: #24303d;
+  --lamp: #f3b84a;
+  --lamp-ink: #221704;
+  --out: #5c4519;
+  --out-ink: #fdf2dc;
+  --out-meta: #d2b98a;
+  --out-accent: #f5c562;
+  --tick: #f6c35a;
+  --in: #222e3b;
+  --chat: #0e151c;
+  --haze: rgba(150, 175, 205, 0.06);
+  --pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='360' height='360' fill='none' stroke='%23fff' stroke-opacity='.035' stroke-width='1.2' stroke-linecap='round'%3E%3Cpath d='M-10 40c40-14 80 14 120 0s80-14 120 0 80 14 140 0'/%3E%3Cpath d='M30 96c34-10 68 10 102 0s68-10 102 0'/%3E%3Cpath d='M-10 150c50-16 100 16 150 0s100-16 150 0 60 10 80 0'/%3E%3Cpath d='M90 212c30-9 60 9 90 0s60-9 90 0'/%3E%3Cpath d='M-10 268c44-14 88 14 132 0s88-14 132 0 66 12 110 0'/%3E%3Cpath d='M20 326c36-10 72 10 108 0s72-10 108 0'/%3E%3C/svg%3E");
+  --danger: #f0735f;
+  --scrim: rgba(0, 0, 0, 0.6);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: 'Onest Variable', ui-sans-serif, system-ui, sans-serif;
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-raised: var(--raised);
+  --color-hover: var(--hover);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-lamp: var(--lamp);
+  --color-lamp-ink: var(--lamp-ink);
+  --color-out: var(--out);
+  --color-out-ink: var(--out-ink);
+  --color-out-meta: var(--out-meta);
+  --color-out-accent: var(--out-accent);
+  --color-tick: var(--tick);
+  --color-in: var(--in);
+  --color-danger: var(--danger);
+  --color-scrim: var(--scrim);
+}
+
+html,
+body {
+  height: 100%;
+}
+#root {
+  height: 100dvh;
+}
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-feature-settings: 'ss01', 'cv11';
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+/* In a layer so Tailwind utilities (outline-none on inputs with their own ring) win. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--lamp);
+    outline-offset: 2px;
+  }
+  button {
+    cursor: pointer;
+  }
+}
+::selection {
+  background: color-mix(in oklab, var(--lamp) 40%, transparent);
+}
+
+/* The chat backdrop: soft banks of fog drifting behind the messages. */
+.fogbank {
+  background-color: var(--chat);
+  background-image:
+    var(--pattern),
+    radial-gradient(60% 40% at 15% 20%, var(--haze), transparent 70%),
+    radial-gradient(50% 35% at 85% 60%, var(--haze), transparent 70%),
+    radial-gradient(70% 30% at 40% 95%, var(--haze), transparent 70%);
+  background-size:
+    360px 360px,
+    140% 140%,
+    140% 140%,
+    140% 140%;
+  animation: drift 60s ease-in-out infinite alternate;
+}
+@keyframes drift {
+  to {
+    background-position:
+      0 0,
+      100% 60%,
+      100% 60%,
+      100% 60%;
+  }
+}
+
+/* Recovery words stay fogged until revealed. */
+.fogged {
+  filter: blur(7px);
+  user-select: none;
+  transition: filter 400ms ease;
+}
+
+.mention {
+  color: var(--lamp);
+  font-weight: 600;
+}
+.bg-out .mention {
+  color: var(--out-accent);
+}
+
+.text-msg {
+  font-size: var(--msg);
+  line-height: 1.38;
+}
+
+/* Bubble tails: a small horn on the last bubble of a group, like a speech balloon. */
+.tail-out::after,
+.tail-in::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  width: 11px;
+  height: 17px;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 11 17'%3E%3Cpath d='M0 0C0 9 2 14 11 17H0Z'/%3E%3C/svg%3E") no-repeat;
+}
+.tail-out::after {
+  right: -8px;
+  background: var(--out);
+}
+.tail-in::after {
+  left: -8px;
+  background: var(--in);
+  transform: scaleX(-1);
+}
+
+/* Long-pressed bubble rises above the blurred backdrop. */
+.lift {
+  animation: lift 220ms cubic-bezier(0.2, 0.9, 0.3, 1.3) forwards;
+}
+@keyframes lift {
+  to {
+    transform: scale(1.03);
+    box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.45);
+  }
+}
+
+.msg-in {
+  animation: msg-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1.15);
+}
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+}
+.flash {
+  animation: flash 1.4s ease;
+}
+@keyframes flash {
+  0%,
+  40% {
+    background-color: color-mix(in oklab, var(--lamp) 28%, transparent);
+  }
+}
+.slide-in {
+  animation: slide-in 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes slide-in {
+  from {
+    transform: translateX(-100%);
+  }
+}
+.slide-out {
+  animation: slide-out 200ms ease-in forwards;
+}
+@keyframes slide-out {
+  to {
+    transform: translateX(-100%);
+  }
+}
+.slide-in-right {
+  animation: slide-in-right 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+}
+.slide-out-right {
+  animation: slide-out-right 200ms ease-in forwards;
+}
+@keyframes slide-out-right {
+  to {
+    transform: translateX(100%);
+  }
+}
+/* Mobile: the chat slides over the list. */
+@media (max-width: 767px) {
+  .chat-enter {
+    animation: slide-in-right 300ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+}
+.pop {
+  animation: pop 200ms cubic-bezier(0.2, 0.9, 0.3, 1.4);
+}
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+}
+.menu-in {
+  animation: menu-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+}
+.rise {
+  animation: rise 220ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+.fade-in {
+  animation: fade-in 200ms ease;
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+.dots span {
+  animation: dot 1.2s infinite;
+}
+.dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--muted) 35%, transparent) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

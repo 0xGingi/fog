@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#101820" media="(prefers-color-scheme: dark)" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="description" content="Fog is a private messenger with Signal-protocol end-to-end encryption. No phone number, no email: your account is a key only you hold." />
+    <meta property="og:title" content="Fog: private messaging without a phone number" />
+    <meta property="og:description" content="Signal-protocol encryption, sealed sender, and an account that's a key instead of your identity." />
+    <meta property="og:image" content="/icon-512.png" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <title>Fog: private messaging without a phone number</title>
+    <script type="module" src="/src/landing.ts"></script>
+  </head>
+  <body class="font-sans">
+    <a href="#main" class="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-lg focus:bg-panel focus:px-4 focus:py-2">Skip to content</a>
+
+    <header class="relative z-10 mx-auto flex max-w-6xl items-center justify-between px-4 py-5 sm:px-6">
+      <a href="/" class="flex items-center gap-2.5 text-xl font-semibold tracking-tight" aria-label="Fog home">
+        <img src="/icon.svg" alt="" class="size-8" />
+        fog
+      </a>
+      <nav class="flex items-center gap-1 text-[15px] sm:gap-2" aria-label="Site">
+        <a href="#security" class="hidden rounded-full px-3 py-2 text-muted hover:text-ink sm:block">Security</a>
+        <a href="#server" class="hidden rounded-full px-3 py-2 text-muted hover:text-ink sm:block">What we see</a>
+        <a href="#self-host" class="hidden rounded-full px-3 py-2 text-muted hover:text-ink md:block">Self-host</a>
+        <a href="https://github.com/0xGingi/fog" rel="noopener" class="hidden rounded-full px-3 py-2 text-muted hover:text-ink sm:block">GitHub</a>
+        <a href="/app/" data-open class="ml-2 rounded-full bg-lamp px-4 py-2 font-semibold text-lamp-ink transition hover:brightness-105">Open Fog</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <!-- Hero: the claim, and a live look at what our server actually receives. -->
+      <section class="relative -mt-[76px] overflow-hidden pt-[76px]">
+        <div class="glow absolute inset-0" aria-hidden="true"></div>
+        <div class="fogbank-waves" aria-hidden="true"></div>
+        <div class="relative mx-auto grid max-w-6xl items-center gap-12 px-4 pt-10 pb-20 sm:px-6 lg:grid-cols-[1fr_1.05fr] lg:gap-16 lg:pt-16 lg:pb-28">
+          <div>
+            <h1 class="lift max-w-[17ch] text-[42px] leading-[1.03] font-semibold tracking-[-0.03em] sm:text-6xl lg:text-[64px]">Private messaging without a phone number.</h1>
+            <p class="mt-6 max-w-[34rem] text-lg leading-relaxed text-muted sm:text-xl">
+              Fog is a messenger with the Signal protocol's end-to-end encryption. You sign up with a key instead of your identity, and our server can't read your messages or tell who sent them.
+            </p>
+            <div class="mt-9 flex flex-wrap items-center gap-x-6 gap-y-4">
+              <a href="/app/" data-open class="rounded-full bg-lamp px-7 py-3.5 text-[17px] font-semibold text-lamp-ink shadow-[0_8px_30px_-8px_var(--glow)] transition hover:brightness-105">Open Fog in your browser</a>
+              <span class="text-[15px] text-muted">Free. No email, no phone, no ads.</span>
+            </div>
+          </div>
+
+          <figure class="relative">
+            <div class="overflow-hidden rounded-[28px] border border-line bg-panel shadow-[0_30px_80px_-30px_rgba(16,24,32,0.35)]">
+              <div class="grid sm:grid-cols-2">
+                <!-- What you see -->
+                <div class="flex flex-col bg-chat sm:h-[26rem]">
+                  <div class="flex items-center gap-3 border-b border-line bg-panel px-4 py-3">
+                    <span class="grid size-9 place-items-center rounded-full bg-[#7c9bb8] text-sm font-semibold text-white" aria-hidden="true">M</span>
+                    <div class="leading-tight">
+                      <p class="font-semibold">Maya</p>
+                      <p class="text-[13px] text-muted">What you see</p>
+                    </div>
+                  </div>
+                  <ol id="you" class="flex h-56 min-h-0 flex-col justify-end gap-1.5 overflow-hidden p-3 sm:h-auto sm:flex-1" aria-live="polite" aria-label="Your conversation"></ol>
+                  <form id="compose" class="flex items-center gap-2 border-t border-line bg-panel p-2.5">
+                    <label for="say" class="sr-only">Type a message to see what the server receives</label>
+                    <input id="say" maxlength="400" autocomplete="off" placeholder="Try typing a message" class="min-w-0 flex-1 rounded-full bg-raised px-4 py-2.5 text-[15px] outline-none placeholder:text-muted" />
+                    <button class="grid size-10 shrink-0 place-items-center rounded-full bg-lamp text-lamp-ink" aria-label="Send">
+                      <svg viewBox="0 0 24 24" class="size-5" fill="currentColor" aria-hidden="true"><path d="M3.4 20.4l17.4-7.5a1 1 0 000-1.8L3.4 3.6a.9.9 0 00-1.3 1l1.6 6.2 9.3 1.2-9.3 1.2-1.6 6.2a.9.9 0 001.3 1z" /></svg>
+                    </button>
+                  </form>
+                </div>
+                <!-- What the server sees -->
+                <div class="flex flex-col bg-code text-code-ink sm:h-[26rem]">
+                  <div class="border-b border-white/10 px-4 py-3 leading-tight">
+                    <p class="font-semibold text-white">getfog.org</p>
+                    <p class="text-[13px] text-white/55">What our server receives</p>
+                  </div>
+                  <ol id="server" class="flex h-56 min-h-0 flex-col justify-end gap-2.5 overflow-hidden p-3 font-mono text-[11.5px] leading-snug sm:h-auto sm:flex-1" aria-label="What the server receives"></ol>
+                  <p id="size" class="border-t border-white/10 px-4 py-3.5 text-[13px] text-white/60" aria-live="polite"></p>
+                </div>
+              </div>
+            </div>
+            <figcaption class="mt-4 max-w-md text-sm leading-relaxed text-muted">
+              Every message is padded to 160-byte steps before it's encrypted, so a "👍" and a paragraph look alike. Between contacts, the sender's name is sealed inside the encryption too.
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <!-- Identity -->
+      <section class="border-y border-line bg-panel">
+        <div class="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-16 lg:py-28">
+          <div>
+            <h2 class="max-w-[16ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Your account is a key, not your identity.</h2>
+            <p class="mt-6 max-w-[36rem] text-lg leading-relaxed text-muted">
+              When you create an account, Fog makes 24 words on your device. They are your account: they derive your encryption key, and your account ID is its public half. Pick a username if you like, so friends can find you. There's nothing to link back to you.
+            </p>
+            <p class="mt-4 max-w-[36rem] text-lg leading-relaxed text-muted">
+              Because your ID <em class="not-italic text-ink">is</em> your key, nobody can quietly swap it out. To be sure a username belongs to who you think, scan their safety code in the chat.
+            </p>
+          </div>
+          <div class="phrase self-center rounded-3xl border border-line bg-raised p-6 sm:p-8" tabindex="0" aria-label="Example recovery phrase. Hover or focus to reveal.">
+            <p class="text-sm font-medium text-muted">Example recovery phrase</p>
+            <ol class="fogged mt-4 grid grid-cols-3 gap-x-4 gap-y-3 text-[15px] sm:grid-cols-4">
+              <li><span class="text-muted tabular-nums">1</span> harbor</li>
+              <li><span class="text-muted tabular-nums">2</span> lantern</li>
+              <li><span class="text-muted tabular-nums">3</span> velvet</li>
+              <li><span class="text-muted tabular-nums">4</span> orbit</li>
+              <li><span class="text-muted tabular-nums">5</span> ember</li>
+              <li><span class="text-muted tabular-nums">6</span> quarry</li>
+              <li><span class="text-muted tabular-nums">7</span> silent</li>
+              <li><span class="text-muted tabular-nums">8</span> marble</li>
+              <li><span class="text-muted tabular-nums">9</span> drift</li>
+              <li><span class="text-muted tabular-nums">10</span> cedar</li>
+              <li><span class="text-muted tabular-nums">11</span> tunnel</li>
+              <li><span class="text-muted tabular-nums">12</span> willow</li>
+            </ol>
+            <p class="mt-5 text-sm leading-relaxed text-muted">Lose these and the account is gone. Nobody, including us, can reset it.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Features -->
+      <section class="mx-auto max-w-6xl px-4 py-20 sm:px-6 lg:py-28">
+        <h2 class="max-w-[20ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Everything you'd expect from a messenger.</h2>
+        <p class="mt-5 max-w-[38rem] text-lg leading-relaxed text-muted">Privacy shouldn't mean giving things up. All of it is end-to-end encrypted.</p>
+        <dl class="mt-12 grid gap-x-12 gap-y-8 sm:grid-cols-2 lg:grid-cols-3">
+          <div class="border-t border-line pt-5">
+            <dt class="font-semibold">Photos, video and any file</dt>
+            <dd class="mt-1.5 leading-relaxed text-muted">Up to 100 MB each, from holiday videos to source code. Encrypted on your device before upload.</dd>
+          </div>
+          <div class="border-t border-line pt-5">
+            <dt class="font-semibold">Voice and video calls</dt>
+            <dd class="mt-1.5 leading-relaxed text-muted">With screen sharing. Turn on relaying to keep your IP address from the person you're calling.</dd>
+          </div>
+          <div class="border-t border-line pt-5">
+            <dt class="font-semibold">Groups</dt>
+            <dd class="mt-1.5 leading-relaxed text-muted">The server can't tell a group from ordinary one-to-one chats. Changes are signed by the group's owner.</dd>
+          </div>
+          <div class="border-t border-line pt-5">
+            <dt class="font-semibold">Voice and video messages</dt>
+            <dd class="mt-1.5 leading-relaxed text-muted">Record a voice note or a short video in a tap. Stickers and polls too.</dd>
+          </div>
+          <div class="border-t border-line pt-5">
+            <dt class="font-semibold">Disappearing messages</dt>
+            <dd class="mt-1.5 leading-relaxed text-muted">From 30 seconds to a week, set per chat. Replies, reactions, edits and pins work as you'd expect.</dd>
+          </div>
+          <div class="border-t border-line pt-5">
+            <dt class="font-semibold">Message requests</dt>
+            <dd class="mt-1.5 leading-relaxed text-muted">Strangers land in a separate inbox. They can't see read receipts, and their calls don't ring, until you accept.</dd>
+          </div>
+        </dl>
+      </section>
+
+      <!-- Security specifics -->
+      <section id="security" class="scroll-mt-6 bg-code text-code-ink">
+        <div class="mx-auto max-w-6xl px-4 py-20 sm:px-6 lg:py-28">
+          <h2 class="max-w-[22ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] text-white sm:text-5xl">How your messages are protected.</h2>
+          <dl class="mt-12 grid gap-x-12 gap-y-10 md:grid-cols-2">
+            <div>
+              <dt class="text-lg font-semibold text-white">The Signal protocol, unmodified</dt>
+              <dd class="mt-2 leading-relaxed">Fog uses Signal's own open-source library, with post-quantum key agreement (PQXDH with Kyber) and the Double Ratchet. Every message gets a fresh key.</dd>
+            </div>
+            <div>
+              <dt class="text-lg font-semibold text-white">Sealed sender</dt>
+              <dd class="mt-2 leading-relaxed">Once you've accepted someone, their messages to you arrive without a sender attached. Only your device learns who wrote them.</dd>
+            </div>
+            <div>
+              <dt class="text-lg font-semibold text-white">Padding</dt>
+              <dd class="mt-2 leading-relaxed">Messages are padded to 160-byte steps and attachments to size buckets, so sizes give little away.</dd>
+            </div>
+            <div>
+              <dt class="text-lg font-semibold text-white">Verification you can do in seconds</dt>
+              <dd class="mt-2 leading-relaxed">Scan each other's safety code once, and Fog marks the chat verified. Keys can't change behind your back.</dd>
+            </div>
+            <div>
+              <dt class="text-lg font-semibold text-white">Locked on your device</dt>
+              <dd class="mt-2 leading-relaxed">App lock encrypts your keys and chats at rest, unlocked by a passcode (Argon2id) or Touch ID, Face ID or Windows Hello.</dd>
+            </div>
+            <div>
+              <dt class="text-lg font-semibold text-white">No third parties</dt>
+              <dd class="mt-2 leading-relaxed">No analytics, no ad networks, no Google fonts or STUN servers. Calls connect through our own servers or directly.</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      <!-- Honest limits -->
+      <section id="server" class="scroll-mt-6 mx-auto max-w-6xl px-4 py-20 sm:px-6 lg:py-28">
+        <h2 class="max-w-[20ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">What our server can and can't see.</h2>
+        <p class="mt-5 max-w-[40rem] text-lg leading-relaxed text-muted">A messenger has to move your messages somehow. Here's exactly what that costs you with Fog.</p>
+        <div class="mt-12 grid gap-6 md:grid-cols-2">
+          <div class="rounded-3xl border border-line bg-panel p-7 sm:p-9">
+            <h3 class="text-xl font-semibold">It can't see</h3>
+            <ul class="mt-5 space-y-3.5 leading-relaxed text-muted">
+              <li>What you write, send or say on a call</li>
+              <li>Your photos, videos, files and voice messages</li>
+              <li>Who sent a message, once you're contacts</li>
+              <li>Which groups you're in, or who's in them</li>
+              <li>Your name and profile photo</li>
+              <li>Your phone number or email, because we never ask</li>
+            </ul>
+          </div>
+          <div class="rounded-3xl border border-line bg-raised p-7 sm:p-9">
+            <h3 class="text-xl font-semibold">It can see</h3>
+            <ul class="mt-5 space-y-3.5 leading-relaxed text-muted">
+              <li>Your IP address when you connect. Use a VPN or Tor if that matters to you.</li>
+              <li>The username you choose, if you choose one</li>
+              <li>Who sends a first message to a stranger, before it's accepted</li>
+              <li>When you're connected, and roughly how much you send</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- Open source -->
+      <section id="self-host" class="scroll-mt-6 border-t border-line bg-panel">
+        <div class="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:gap-16 lg:py-28">
+          <div>
+            <h2 class="max-w-[16ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Don't trust us. Check.</h2>
+            <p class="mt-6 max-w-[36rem] text-lg leading-relaxed text-muted">
+              Fog is open source under the AGPL, client and server alike. The web app builds byte-for-byte reproducibly, so you can confirm getfog.org serves exactly the published code.
+            </p>
+            <p class="mt-4 max-w-[36rem] text-lg leading-relaxed text-muted">
+              Or run your own: one command brings up the server, HTTPS and a call relay on your domain.
+            </p>
+            <a href="https://github.com/0xGingi/fog" rel="noopener" class="mt-8 inline-flex items-center gap-2.5 rounded-full border border-line bg-raised px-5 py-3 font-semibold transition hover:border-muted">
+              <svg viewBox="0 0 24 24" class="size-5" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 00-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 015.77 0c2.2-1.49 3.17-1.18 3.17-1.18.62 1.59.23 2.76.11 3.05.74.81 1.18 1.83 1.18 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0012 .5z" /></svg>
+              View the source on GitHub
+            </a>
+          </div>
+          <div class="space-y-4 self-center">
+            <pre class="overflow-x-auto rounded-2xl bg-code p-5 font-mono text-[13.5px] leading-relaxed text-code-ink"><code><span class="text-white/45"># run your own Fog</span>
+cp .env.example .env      <span class="text-white/45"># your domain + a secret</span>
+docker compose up -d --build</code></pre>
+            <pre class="overflow-x-auto rounded-2xl bg-code p-5 font-mono text-[13.5px] leading-relaxed text-code-ink"><code><span class="text-white/45"># check what getfog.org serves</span>
+bun web/verify.ts https://getfog.org ./my-build
+<span class="text-[#f5c562]">All 17 files match.</span></code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Questions -->
+      <section class="mx-auto max-w-3xl px-4 py-20 sm:px-6 lg:py-28">
+        <h2 class="text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Questions</h2>
+        <div class="mt-10 divide-y divide-line border-y border-line">
+          <details class="group py-5">
+            <summary class="flex cursor-pointer list-none items-center justify-between gap-4 text-lg font-semibold">
+              Can I use Fog on more than one device?
+              <span class="text-2xl leading-none text-muted transition group-open:rotate-45" aria-hidden="true">+</span>
+            </summary>
+            <p class="mt-3 leading-relaxed text-muted">Not yet. For now an account lives on one device at a time. Restoring your 24 words on a new device moves the account there. Linked devices are on the roadmap.</p>
+          </details>
+          <details class="group py-5">
+            <summary class="flex cursor-pointer list-none items-center justify-between gap-4 text-lg font-semibold">
+              What happens if I lose my recovery phrase?
+              <span class="text-2xl leading-none text-muted transition group-open:rotate-45" aria-hidden="true">+</span>
+            </summary>
+            <p class="mt-3 leading-relaxed text-muted">The account can't be recovered. There's no email or phone number to reset it with, which is also why nobody else can take it over. Write the words down somewhere safe.</p>
+          </details>
+          <details class="group py-5">
+            <summary class="flex cursor-pointer list-none items-center justify-between gap-4 text-lg font-semibold">
+              Is a web app safe for private messaging?
+              <span class="text-2xl leading-none text-muted transition group-open:rotate-45" aria-hidden="true">+</span>
+            </summary>
+            <p class="mt-3 leading-relaxed text-muted">A web app is only as trustworthy as the server that delivers it. Fog's builds are reproducible so anyone can check them, and the desktop app ships the code once instead of loading it on every visit.</p>
+          </details>
+          <details class="group py-5">
+            <summary class="flex cursor-pointer list-none items-center justify-between gap-4 text-lg font-semibold">
+              How is this different from Signal?
+              <span class="text-2xl leading-none text-muted transition group-open:rotate-45" aria-hidden="true">+</span>
+            </summary>
+            <p class="mt-3 leading-relaxed text-muted">Fog uses the same encryption library. The differences are around it: no phone number at all, accounts tied to a key you hold, and a server you can run yourself.</p>
+          </details>
+          <details class="group py-5">
+            <summary class="flex cursor-pointer list-none items-center justify-between gap-4 text-lg font-semibold">
+              Who pays for it?
+              <span class="text-2xl leading-none text-muted transition group-open:rotate-45" aria-hidden="true">+</span>
+            </summary>
+            <p class="mt-3 leading-relaxed text-muted">Fog has no ads and collects nothing to sell. The server is small and cheap to run, and anyone can host their own.</p>
+          </details>
+        </div>
+      </section>
+
+      <section class="relative overflow-hidden border-t border-line">
+        <div class="glow absolute inset-0" aria-hidden="true"></div>
+        <div class="relative mx-auto flex max-w-6xl flex-col items-start gap-8 px-4 py-20 sm:px-6 md:flex-row md:items-center md:justify-between lg:py-24">
+          <h2 class="max-w-[18ch] text-4xl leading-[1.08] font-semibold tracking-[-0.02em] sm:text-5xl">Start a conversation nobody else can read.</h2>
+          <a href="/app/" data-open class="shrink-0 rounded-full bg-lamp px-7 py-3.5 text-[17px] font-semibold text-lamp-ink transition hover:brightness-105">Open Fog</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="border-t border-line">
+      <div class="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-8 text-sm text-muted sm:px-6">
+        <span class="flex items-center gap-2"><img src="/icon.svg" alt="" class="size-5" /> Fog. Open source under the AGPL-3.0, <a href="https://github.com/0xGingi/fog" rel="noopener" class="underline decoration-line underline-offset-4 hover:text-ink">on GitHub</a>.</span>
+        <span>No cookies, no analytics, no trackers on this page.</span>
+      </div>
+    </footer>
+  </body>
+</html>

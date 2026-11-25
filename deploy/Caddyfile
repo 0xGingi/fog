@@ -1,0 +1,10 @@
+# Automatic HTTPS (Let's Encrypt) for the domain. No access logs: we don't keep IPs.
+{$FOG_DOMAIN} {
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+	reverse_proxy fog:8787
+}
+
+www.{$FOG_DOMAIN} {
+	redir https://{$FOG_DOMAIN}{uri} permanent
+}
