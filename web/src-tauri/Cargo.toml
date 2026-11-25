@@ -1,6 +1,6 @@
 [package]
 name = "fog-desktop"
-version = "0.3.4"
+version = "0.3.5"
 description = "Fog desktop app"
 license = "AGPL-3.0-only"
 edition = "2024"

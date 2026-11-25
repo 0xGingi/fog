@@ -592,8 +592,9 @@ function Main() {
   const width = useFog((s) => s.settings.sidebar ?? 360)
   const collapsed = useFog((s) => !!s.settings.sidebarCollapsed)
   const [dragW, setDragW] = useState<number | null>(null)
-  // Folded to a rail, except while a panel (settings, new chat...) needs the room.
-  const rail = collapsed && panel === 'none' && dragW === null
+  // Folded to a rail, except while a panel (settings, new chat...) needs the room. While dragging,
+  // the preview is either the rail or a real chat list, never a full list squeezed in between.
+  const rail = panel === 'none' && (dragW === null ? collapsed : dragW === RAIL)
   const [info, setInfo] = useState(false)
   const search = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -622,7 +623,7 @@ function Main() {
       <aside
         ref={aside}
         style={{ '--sb': `${rail ? RAIL : (dragW ?? width)}px` } as React.CSSProperties}
-        className={`relative flex w-full shrink-0 flex-col overflow-hidden border-line md:w-[var(--sb)] md:border-r ${dragW === null ? 'md:transition-[width] md:duration-200' : ''} ${active ? 'max-md:hidden' : ''}`}
+        className={`relative flex w-full shrink-0 flex-col overflow-hidden border-line md:w-[var(--sb)] md:border-r ${dragW === null || dragW === RAIL || dragW === SB_MIN ? 'md:transition-[width] md:duration-150' : ''} ${active ? 'max-md:hidden' : ''}`}
       >
         <Sidebar
           compact={rail}
@@ -753,7 +754,8 @@ function Sidebar({
 
   return (
     <>
-      <header className="flex h-16 shrink-0 items-center gap-2 px-3">
+      {/* min-w: as the list widens out of the rail, it's revealed at its real size, not squeezed. */}
+      <header className="flex h-16 shrink-0 items-center gap-2 px-3 md:min-w-[280px]">
         <IconButton icon="menu" label="Settings" onClick={onMenu} />
         <div className="flex h-10 flex-1 items-center gap-2 rounded-full bg-raised px-3 text-muted focus-within:ring-2 focus-within:ring-lamp/50">
           {conn === 'online' ? <Icon name="search" className="size-5 shrink-0" /> : <Spinner className="size-4 shrink-0" />}
@@ -770,7 +772,7 @@ function Sidebar({
         </div>
       </header>
       <nav
-        className="scroll-thin flex-1 overflow-y-auto px-2 pb-24"
+        className="scroll-thin flex-1 overflow-y-auto px-2 pb-24 md:min-w-[280px]"
         aria-label="Chats"
         onKeyDown={(e) => {
           // Arrow keys move between chats, like a list.

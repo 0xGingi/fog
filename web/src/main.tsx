@@ -1,3 +1,4 @@
+import { Component, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import { App } from './App'
@@ -82,5 +83,32 @@ if (native && navigator.maxTouchPoints > 1 && /iPhone|iPad|Macintosh/.test(navig
   }
 }
 
-createRoot(document.getElementById('root')!).render(<App />)
+/** If drawing the app ever fails, show a way out instead of a blank window. (Nothing is sent anywhere.) */
+class Crashed extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  render() {
+    if (!this.state.error) return this.props.children
+    return (
+      <div className="grid h-full place-items-center bg-panel p-6 text-center text-ink">
+        <div className="max-w-sm">
+          <p className="text-lg font-semibold">Something went wrong</p>
+          <p className="mt-2 text-sm text-muted">Fog hit an unexpected problem. Your messages and keys are safe on this device.</p>
+          <button onClick={() => location.reload()} className="mt-5 rounded-full bg-lamp px-5 py-2.5 font-semibold text-lamp-ink">
+            Reload Fog
+          </button>
+          <p className="mt-4 font-mono text-xs break-words text-muted/70">{String(this.state.error.message).slice(0, 200)}</p>
+        </div>
+      </div>
+    )
+  }
+}
+
+createRoot(document.getElementById('root')!).render(
+  <Crashed>
+    <App />
+  </Crashed>,
+)
 boot()

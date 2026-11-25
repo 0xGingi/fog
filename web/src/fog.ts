@@ -531,6 +531,36 @@ function connect() {
   }
 }
 
+/**
+ * Heartbeat. A phone app in the background or a Mac app hidden in the menu bar can have its
+ * connection die without the socket noticing, and then it looks connected while nothing arrives.
+ * So every 30 s while Fog is open, and right away when it comes back to the front or the network
+ * returns, ask the server something small; no answer within 5 s means reconnect now.
+ */
+async function checkAlive() {
+  if (!acct || unlinkedNow) return
+  if (state.conn === 'offline') {
+    backoff = 500 // back from the background or offline: reconnect now, not after the backoff
+    return connect()
+  }
+  if (state.conn !== 'online' || ws?.readyState !== WebSocket.OPEN) return
+  const sock = ws
+  const dead = setTimeout(() => {
+    if (ws !== sock) return
+    pending.forEach((p) => p.rej(new Error('offline')))
+    pending.clear()
+    connect()
+  }, 5000)
+  // Any answer (even an error) proves the connection is alive. `away` also tells the server
+  // whether anyone's looking, which phones need for push.
+  await rpc({ t: 'away', away: document.hidden }).catch(() => {})
+  clearTimeout(dead)
+}
+setInterval(() => document.visibilityState === 'visible' && void checkAlive(), 30_000)
+document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && void checkAlive())
+window.addEventListener('online', () => void checkAlive())
+window.addEventListener('focus', () => void checkAlive())
+
 function rpc(req: Record<string, unknown>): Promise<any> {
   // Before `ready` the socket isn't authenticated; only the key upload in the ready handler may go out.
   if (ws?.readyState !== WebSocket.OPEN || (state.conn !== 'online' && req.t !== 'keys'))
@@ -658,7 +688,9 @@ async function refreshDevices() {
 /** A label for this device in the main device's list. */
 function deviceName() {
   const ua = navigator.userAgent
-  const os = /Mac/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Linux/.test(ua) ? 'Linux' : 'this computer'
+  // iPhones say "like Mac OS X", and iPads can report a Mac: check them first.
+  const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)
+  const os = /iPhone/.test(ua) ? 'iPhone' : ipad ? 'iPad' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'this computer'
   if (location.protocol === 'tauri:' || location.hostname === 'tauri.localhost') return `Fog for ${os}`
   const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser'
   return `${browser} on ${os}`
@@ -1228,7 +1260,12 @@ let guide: Guide | null = null
 export const setGuide = (g: Guide) => void (guide = g)
 /** Open the guide chat (from Settings), starting it again if it was deleted. */
 export function openGuide() {
-  if (!state.chats[GUIDE]) guide?.start()
+  // The chat has to exist before it's opened (the guide's first message arrives a moment later).
+  if (!state.chats[GUIDE]) {
+    setChat(GUIDE, (c) => c)
+    saveChatsSoon()
+    guide?.start()
+  }
   openChat(GUIDE)
 }
 /** The guide writes a message (shown as typing first, like a person). */

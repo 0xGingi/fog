@@ -897,14 +897,25 @@ function PollDialog({ onClose, onSend }: { onClose: () => void; onSend: (p: Poll
   const [q, setQ] = useState('')
   const [opts, setOpts] = useState(['', ''])
   const [multi, setMulti] = useState(false)
+  const box = useRef<HTMLDivElement>(null)
   const filled = opts.map((o) => o.trim()).filter(Boolean)
-  const ok = q.trim() && filled.length >= 2
-  const setOpt = (i: number, v: string) => setOpts((os) => {
-    const next = os.map((o, k) => (k === i ? v.slice(0, 100) : o))
-    // Always keep one empty row at the end to type the next option (max 10).
-    if (next.at(-1)?.trim() && next.length < 10) next.push('')
-    return next
-  })
+  const same = new Set(filled.map((o) => fog.fold(o))).size !== filled.length
+  const ok = q.trim() && filled.length >= 2 && !same
+  const setOpt = (i: number, v: string) =>
+    setOpts((os) => {
+      const next = os.map((o, k) => (k === i ? v.slice(0, 100) : o))
+      // Always keep one empty row at the end to type the next option (max 10).
+      if (next.at(-1)?.trim() && next.length < 10) next.push('')
+      return next
+    })
+  // Enter moves on to the next field, like a form you fill in top to bottom.
+  const next = (e: React.KeyboardEvent, i: number) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    const fields = [...box.current!.querySelectorAll('input[type=text]')] as HTMLInputElement[]
+    fields[i + 1]?.focus()
+  }
+  const field = 'h-11 w-full rounded-xl border border-line bg-raised px-3.5 text-base text-ink outline-none placeholder:text-muted focus:border-lamp'
   return (
     <Dialog
       title="New poll"
@@ -920,33 +931,30 @@ function PollDialog({ onClose, onSend }: { onClose: () => void; onSend: (p: Poll
         </>
       }
     >
-      <input
-        value={q}
-        onChange={(e) => setQ(e.target.value.slice(0, 300))}
-        autoFocus
-        placeholder="Ask a question"
-        className="mt-2 h-12 w-full rounded-xl border border-line bg-raised px-4 text-base font-medium text-ink outline-none focus:border-lamp"
-      />
-      <p className="mt-4 mb-1.5 text-sm font-semibold text-lamp">Options</p>
-      <div className="space-y-1.5">
-        {opts.map((o, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <input
-              value={o}
-              onChange={(e) => setOpt(i, e.target.value)}
-              placeholder={`Option ${i + 1}`}
-              className="h-11 min-w-0 flex-1 rounded-xl border border-line bg-raised px-3 text-base text-ink outline-none focus:border-lamp"
-            />
-            {opts.length > 2 && o && (
-              <IconButton icon="close" label="Remove option" onClick={() => setOpts((os) => os.filter((_, k) => k !== i))} className="size-9" />
-            )}
-          </div>
-        ))}
+      <div ref={box}>
+        <label className="mt-1 mb-1.5 block text-sm font-semibold text-lamp" htmlFor="poll-q">
+          Question
+        </label>
+        <input id="poll-q" type="text" value={q} onChange={(e) => setQ(e.target.value.slice(0, 300))} onKeyDown={(e) => next(e, 0)} autoFocus placeholder="Ask a question" className={`${field} font-medium`} />
+        <p className="mt-4 mb-1.5 text-sm font-semibold text-lamp">Options</p>
+        <div className="space-y-1.5">
+          {opts.map((o, i) => (
+            <div key={i} className="relative">
+              <input type="text" value={o} onChange={(e) => setOpt(i, e.target.value)} onKeyDown={(e) => next(e, i + 1)} placeholder={`Option ${i + 1}`} aria-label={`Option ${i + 1}`} className={`${field} pr-10`} />
+              {opts.length > 2 && o && (
+                <button type="button" onClick={() => setOpts((os) => os.filter((_, k) => k !== i))} aria-label={`Remove option ${i + 1}`} className="absolute top-1/2 right-1.5 grid size-8 -translate-y-1/2 place-items-center rounded-lg text-muted transition hover:bg-hover hover:text-ink">
+                  <Icon name="close" className="size-4" />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        {same && <p className="mt-2 text-sm text-danger">Each option needs to be different.</p>}
+        <label className="mt-4 flex cursor-pointer items-center gap-2 text-sm text-ink">
+          <input type="checkbox" checked={multi} onChange={(e) => setMulti(e.target.checked)} className="size-4 accent-[var(--lamp)]" />
+          Allow multiple answers
+        </label>
       </div>
-      <label className="mt-4 flex cursor-pointer items-center gap-2 text-sm text-ink">
-        <input type="checkbox" checked={multi} onChange={(e) => setMulti(e.target.checked)} className="size-4 accent-[var(--lamp)]" />
-        Allow multiple answers
-      </label>
     </Dialog>
   )
 }
