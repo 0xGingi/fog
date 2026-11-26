@@ -54,7 +54,12 @@ class FogPlugin(private val activity: Activity) : Plugin(activity) {
         activity.getSystemService(NotificationManager::class.java).cancelAll()
     }
 
-    /** This install's push token (FCM). Asks for notification permission on Android 13+ the first time. */
+    /**
+     * This install's push token (FCM). Asks for notification permission on Android 13+ the first time.
+     * Firebase answers from its cache when it has a token, so this is quick after the first launch.
+     * (Firebase's newer register() only works with installation-ID mode turned on in the manifest; it
+     * failed with "API disabled", which is why Android installs had no push.)
+     */
     @Command
     fun token(invoke: Invoke) {
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(activity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -62,20 +67,12 @@ class FogPlugin(private val activity: Activity) : Plugin(activity) {
         }
         // Built without google-services.json: no push, Fog notifies only while it's open.
         if (FirebaseApp.getApps(activity).isEmpty()) return invoke.reject("push isn't set up in this build")
-        // Firebase hands the token to FogMessagingService (below). The last one is kept, so later
-        // launches answer at once while register() refreshes it in the background.
-        val saved = activity.getSharedPreferences("fog", Context.MODE_PRIVATE).getString("push", null)
-        if (saved != null) invoke.resolve(JSObject().apply { put("token", saved) }) else synchronized(waiting) { waiting += invoke }
-        FirebaseMessaging.getInstance().register().addOnFailureListener { e -> answer { it.reject(e.message ?: "no push token") } }
-    }
-
-    companion object {
-        private val waiting = mutableListOf<Invoke>()
-
-        fun answer(reply: (Invoke) -> Unit) = synchronized(waiting) {
-            waiting.forEach(reply)
-            waiting.clear()
-        }
+        FirebaseMessaging.getInstance().token
+            .addOnSuccessListener { t -> invoke.resolve(JSObject().apply { put("token", t) }) }
+            .addOnFailureListener { e ->
+                Log.w("Fog", "no push token: ${e.message}")
+                invoke.reject(e.message ?: "no push token")
+            }
     }
 
     /**
@@ -124,22 +121,8 @@ class FogPlugin(private val activity: Activity) : Plugin(activity) {
     }
 }
 
-/**
- * Receives this install's push token from Firebase (and any later replacement). Depending on the
- * phone's Google Play services version, register() reports it through onRegistered (newer) or
- * onNewToken (older), so both are handled; missing one left most Android installs without push.
- */
+/** Pushes that arrive while Fog is closed. (A replaced token reaches the server the next time Fog opens.) */
 class FogMessagingService : FirebaseMessagingService() {
-    override fun onRegistered(token: String) = save(token)
-
-    override fun onNewToken(token: String) = save(token)
-
-    private fun save(token: String) {
-        Log.i("Fog", "push registration ready")
-        getSharedPreferences("fog", Context.MODE_PRIVATE).edit().putString("push", token).apply()
-        FogPlugin.answer { it.resolve(JSObject().apply { put("token", token) }) }
-    }
-
     // Calls arrive as data-only pushes (messages are notifications Android shows by itself).
     override fun onMessageReceived(message: RemoteMessage) {
         if (message.data["type"] == "call") Ringing.show(this)
