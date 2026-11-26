@@ -4,7 +4,8 @@ import * as fog from './fog'
 import { attLabel, chatTitle, msgStatus, personName, timerLabel, useFog, type Chat, type LinkPreview, type Msg } from './fog'
 import { fmtDur as dur } from './media'
 import { cycleRate, download, fmtDur, fmtSize, localBlob, posterNow, saveFile, seek, thumbIsBlank, togglePlay, useLocalUrl, usePlayer, useTransfer, type Att } from './media'
-import { Avatar, copy, Icon, usePressMenu, Zoomable, type MenuAt } from './ui'
+import { Avatar, copy, Icon, Menu, MenuItem, Spinner, usePressMenu, Zoomable, type MenuAt } from './ui'
+import { Md, mdPlain, openLink } from './markdown'
 
 // ---------- formatting ----------
 export const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
@@ -16,7 +17,8 @@ export function dayLabel(ts: number) {
   return new Date(ts).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long', year: new Date(ts).getFullYear() === new Date().getFullYear() ? undefined : 'numeric' })
 }
 const plain = (t: string) => t.replace(/```/g, '').replace(/(^|[^\p{L}\p{N}])([*_~`])(\S(?:.*?\S)?)\2(?![\p{L}\p{N}])/gu, '$1$3')
-export const snippet = (m: Msg) => (m.sys ? sysText(m) : m.poll ? `📊 ${m.poll.q}` : m.att ? (m.text ? `${attLabel(m.att).split(' ')[0]} ${plain(m.text)}` : attLabel(m.att)) : plain(m.text))
+const flat = (m: Msg) => (m.md ? mdPlain(m.text) : plain(m.text)).replace(/\s*\n\s*/g, ' ')
+export const snippet = (m: Msg) => (m.sys ? sysText(m) : m.poll ? `📊 ${m.poll.q}` : m.att ? (m.text ? `${attLabel(m.att).split(' ')[0]} ${flat(m)}` : attLabel(m.att)) : flat(m))
 
 export function sysText(m: Msg) {
   const s = m.sys!
@@ -32,6 +34,7 @@ export function sysText(m: Msg) {
     timer: s.secs ? `${by} set messages to disappear after ${timerLabel(s.secs)}` : `${by} turned off disappearing messages`,
     pin: `${by} pinned “${s.name}”`,
     call: s.call ? callText(s.call) : "",
+    thread: `${by} started a thread “${s.name}”`,
     fork: '⚠️ Members of this group are seeing different member lists. The owner may be showing different groups to different people.',
   }[s.k]
 }
@@ -387,6 +390,7 @@ export function Bubble(props: BubbleProps) {
   const meta = (
     <span className={`flex items-center gap-1 text-[11.5px] whitespace-nowrap ${m.mine ? 'text-out-meta' : 'text-muted'}`} title={fullDate(m.ts)}>
       {m.ttl && <Icon name="timer" className="size-3.5" />}
+      {m.only && <span title="Only you can see this message">only you</span>}
       {m.edited && <span>edited</span>}
       {fmtTime(m.ts)}
       {m.mine &&
@@ -457,16 +461,28 @@ export function Bubble(props: BubbleProps) {
               <span className="rounded-full bg-black/25 px-2 py-0.5 backdrop-blur-sm [&_*]:!text-white">{meta}</span>
             </div>
           </div>
-        ) : m.text ? (
-          <div className="text-msg relative px-3 pt-1.5 pb-1.5 break-words whitespace-pre-wrap">
-            <Rich text={m.text} />
+        ) : m.text || m.card ? (
+          <div className={`text-msg relative px-3 pt-1.5 pb-1.5 break-words ${m.md ? '' : 'whitespace-pre-wrap'}`}>
+            {m.card ? (
+              <div className="my-0.5 border-l-[3px] pl-2.5" style={{ borderColor: m.card.color ?? 'currentColor' }}>
+                {m.card.title && <p className="font-semibold">{m.card.title}</p>}
+                {m.md ? <Md text={m.text} /> : <Rich text={m.text} />}
+                {m.card.footer && <p className="mt-1 text-[12.5px] opacity-70">{m.card.footer}</p>}
+              </div>
+            ) : m.md ? (
+              <Md text={m.text} />
+            ) : (
+              <Rich text={m.text} />
+            )}
+            {m.live && <span className="caret ml-0.5 inline-block h-[1.05em] w-[0.5em] translate-y-[0.15em] rounded-[2px] bg-current/60" aria-label="Writing" />}
             {/* Reserve room so the timestamp tucks into the last line. */}
-            <span className={`inline-block ${m.mine ? (m.edited ? 'w-[7.5rem]' : 'w-[4.75rem]') : m.edited ? 'w-[6.25rem]' : 'w-[3.5rem]'}`} aria-hidden />
+            <span className={`inline-block ${m.mine ? (m.edited ? 'w-[7.5rem]' : 'w-[4.75rem]') : m.edited || m.only ? 'w-[6.25rem]' : 'w-[3.5rem]'}`} aria-hidden />
             <span className="absolute right-3 bottom-1">{meta}</span>
           </div>
         ) : a && (a.kind === 'audio' || a.kind === 'file') ? (
           <div className="flex justify-end px-3 pb-1.5">{meta}</div>
         ) : null}
+        {m.kb && !selecting && <Keys m={m} chat={chat} />}
         {counts.size > 0 && (
           <div className={`flex flex-wrap gap-1 px-2 pb-1.5 ${big ? 'justify-end pt-1' : media && !m.text ? 'pt-1.5' : '-mt-0.5'}`}>
             {[...counts].map(([e, n]) => {
@@ -504,6 +520,88 @@ export function Bubble(props: BubbleProps) {
         <span className="absolute right-0 bottom-2 grid size-8 place-items-center rounded-full bg-black/25 text-white" style={{ opacity: Math.min(1, -dx / 56), transform: `scale(${-dx >= 56 ? 1.1 : 0.8})` }}>
           <Icon name="reply" className="size-4" />
         </span>
+      )}
+    </div>
+  )
+}
+
+/** A bot's buttons and dropdowns under its message. A tap goes to the bot alone (end-to-end encrypted). */
+function Keys({ m, chat }: { m: Msg; chat: Chat }) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [open, setOpen] = useState<{ sel: fog.Sel; at: MenuAt; picked: string[] } | null>(null)
+  const botId = m.from ?? chat.id
+  const send = (key: string, d: string, v?: string[]) => {
+    if (busy || m.mine) return
+    setBusy(key)
+    fog.tap(chat.id, m.id, botId, d, v ? { v } : {}).finally(() => setBusy(null))
+  }
+  const style = (s?: string) =>
+    s === 'primary' ? 'bg-lamp text-lamp-ink' : s === 'danger' ? 'bg-danger/90 text-white' : s === 'success' ? 'bg-emerald-600 text-white' : m.mine ? 'bg-black/[0.08]' : 'bg-black/[0.06] dark:bg-white/10'
+  return (
+    <div className="flex flex-col gap-1 px-1.5 pb-1.5" onPointerDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.stopPropagation()}>
+      {m.kb!.map((row, r) =>
+        Array.isArray(row) ? (
+          <div key={r} className="flex gap-1">
+            {row.map((b, i) => {
+              const key = `${r}.${i}`
+              return (
+                <button
+                  key={key}
+                  disabled={!!busy && !b.u}
+                  onClick={(e) => (e.stopPropagation(), b.u ? openLink(b.u) : send(key, b.d!))}
+                  className={`flex min-h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-[10px] px-2.5 py-1.5 text-[14px] leading-tight font-semibold transition hover:brightness-95 active:scale-[0.98] disabled:opacity-60 ${style(b.s)}`}
+                >
+                  {busy === key ? <Spinner className="size-4" /> : <span className="truncate">{b.l}</span>}
+                  {b.u && <Icon name="link" className="size-3.5 shrink-0 opacity-70" />}
+                </button>
+              )
+            })}
+          </div>
+        ) : (
+          <button
+            key={r}
+            disabled={!!busy}
+            onClick={(e) => {
+              e.stopPropagation()
+              const rect = e.currentTarget.getBoundingClientRect()
+              setOpen({ sel: row, at: { x: rect.left, y: rect.bottom + 4 }, picked: row.o.filter((o) => o.on).map((o) => o.v) })
+            }}
+            className={`flex min-h-9 items-center justify-between gap-2 rounded-[10px] px-3 py-1.5 text-left text-[14px] transition hover:brightness-95 ${style()}`}
+          >
+            <span className="truncate opacity-80">{busy === `s${r}` ? <Spinner className="size-4" /> : (row.o.filter((o) => o.on).map((o) => o.l).join(', ') || row.ph || 'Choose…')}</span>
+            <Icon name="down" className="size-4 shrink-0 opacity-70" />
+          </button>
+        ),
+      )}
+      {open && (
+        <Menu at={open.at} onClose={() => setOpen(null)}>
+          {open.sel.o.map((o) => {
+            const multi = (open.sel.max ?? 1) > 1
+            const on = open.picked.includes(o.v)
+            return (
+              <MenuItem
+                key={o.v}
+                icon={multi ? (on ? 'check' : 'plus') : on ? 'check' : 'next'}
+                label={o.d ? `${o.l} · ${o.d}` : o.l}
+                onClick={() => {
+                  if (!multi) return (setOpen(null), send(`s${m.kb!.indexOf(open.sel)}`, open.sel.sel, [o.v]))
+                  setOpen({ ...open, picked: on ? open.picked.filter((x) => x !== o.v) : [...open.picked, o.v].slice(0, open.sel.max) })
+                }}
+              />
+            )
+          })}
+          {(open.sel.max ?? 1) > 1 && (
+            <MenuItem
+              icon="send"
+              label={`Done (${open.picked.length})`}
+              onClick={() => {
+                if (open.picked.length < (open.sel.min ?? 1)) return fog.toast(`Choose at least ${open.sel.min ?? 1}`)
+                setOpen(null)
+                send(`s${m.kb!.indexOf(open.sel)}`, open.sel.sel, open.picked)
+              }}
+            />
+          )}
+        </Menu>
       )}
     </div>
   )

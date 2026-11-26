@@ -8,9 +8,11 @@ import './guide'
 // Safari on iPhone/iPad: the keyboard covers the page instead of shrinking it, and WebKit scrolls the
 // whole page up to keep the text box visible, pushing the chat header off screen. Instead, size the
 // app to the part above the keyboard and keep the page itself still. (The phone apps resize natively.)
+// Android too: Firefox leaves 100dvh stale after the keyboard closes, pushing the composer off screen;
+// in Chrome the visual viewport already matches the page, so this changes nothing there.
 const vv = window.visualViewport
 const native = '__TAURI_INTERNALS__' in window
-if (vv && !native && navigator.maxTouchPoints > 1 && /iPhone|iPad|Macintosh/.test(navigator.userAgent)) {
+if (vv && !native && navigator.maxTouchPoints > 1 && /iPhone|iPad|Macintosh|Android/.test(navigator.userAgent)) {
   const root = document.documentElement
   const fit = () => {
     root.style.setProperty('--app-h', `${vv.height}px`)

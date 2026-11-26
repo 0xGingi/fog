@@ -5,7 +5,7 @@ import { chatAvatar, chatTitle, msgStatus, others, personName, SAVED, timerLabel
 import { MAX_GROUP_CALL, startCall, startGroupCall } from './call'
 import { fmtDur, fmtSize, MAX_FILE, MAX_NOTE, previewThumb, record, recordVideoNote, type Att, type Recording, type VideoNoteRec } from './media'
 import { Bubble, dayLabel, fullDate, MediaViewer, snippet, Sticker, sysText, Ticks, TextViewer } from './bubble'
-import { Avatar, Button, copy, Dialog, Icon, IconButton, Menu, MenuItem, Spinner, type MenuAt } from './ui'
+import { Avatar, BotBadge, Button, copy, Dialog, Icon, IconButton, Menu, MenuItem, Spinner, type MenuAt } from './ui'
 
 const REACTIONS = ['❤️', '👍', '😂', '😮', '😢', '🙏', '🔥']
 const PAGE = 80
@@ -44,10 +44,23 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
   const [info, setInfo] = useState<Msg | null>(null)
   const [pinIdx, setPinIdx] = useState(0)
   const typing = chat?.typing && chat.typing.until > Date.now() ? chat.typing : null
+  // Threads: the open one replaces the main conversation; its messages never show in the main one.
+  const thread = useFog((s) => s.thread)
+  const th = thread ? chat?.threads?.[thread] : undefined
+  const msgs = useMemo(() => (chat ? chat.messages.filter((m) => (thread ? m.th === thread : !m.th)) : []), [chat?.messages, thread])
+  const threadStats = useMemo(() => {
+    const st = new Map<string, { n: number; last: number }>()
+    for (const m of chat?.messages ?? []) if (m.th) st.set(m.th, { n: (st.get(m.th)?.n ?? 0) + 1, last: m.ts })
+    return st
+  }, [chat?.messages])
+  const [naming, setNaming] = useState<{ root?: Msg; rename?: string } | null>(null)
+  const [threadList, setThreadList] = useState<MenuAt | null>(null)
+  const me = fog.getState().me?.id
+  const canRename = !!th && (th.by === me || chat?.group?.owner === me)
   // Mesh calls get heavy past a handful of people: everyone sends to everyone.
   const groupCall = (video: boolean) =>
     (chat?.group?.members.length ?? 0) > MAX_GROUP_CALL ? fog.toast(`Group calls are for up to ${MAX_GROUP_CALL} people`) : startGroupCall(id, video)
-  const count = chat?.messages.length ?? 0
+  const count = msgs.length
   const prevCount = useRef(count)
 
   useLayoutEffect(() => {
@@ -88,15 +101,17 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
   }, [id, count])
   useEffect(() => {
     if (!jump || jump.at < mountedAt.current - 2000 || !chat) return
-    const idx = chat.messages.findIndex((m) => m.id === jump.id)
-    if (idx < 0) return fog.toast('That message is no longer here')
-    if (idx < chat.messages.length - limit) return setLimit(chat.messages.length - idx + 20)
+    const target = chat.messages.find((m) => m.id === jump.id)
+    if (!target) return fog.toast('That message is no longer here')
+    if ((target.th ?? null) !== thread) return fog.openThread(target.th ?? null)
+    const idx = msgs.findIndex((m) => m.id === jump.id)
+    if (idx < msgs.length - limit) return setLimit(msgs.length - idx + 20)
     const el = scroller.current?.querySelector(`[data-mid="${CSS.escape(jump.id)}"]`)
     el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
     setFlash(jump.id)
     const t = setTimeout(() => setFlash(null), 1500)
     return () => clearTimeout(t)
-  }, [jump, limit])
+  }, [jump, limit, thread])
   useEffect(() => {
     if (!selected) return
     const key = (e: KeyboardEvent) => e.key === 'Escape' && (e.stopPropagation(), setSelected(null))
@@ -127,9 +142,10 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
   if (!chat) return null
   const title = chatTitle(chat, person)
   const left = !!chat.group?.left
-  const shown = chat.messages.slice(-limit)
-  const hidden = chat.messages.length - shown.length
+  const shown = msgs.slice(-limit)
+  const hidden = msgs.length - shown.length
   const byId = (mid?: string) => (mid ? chat.messages.find((x) => x.id === mid) : undefined)
+  const rootOf = (mid: string) => Object.values(chat.threads ?? {}).find((t) => t.root === mid)
   const sel = selected ? chat.messages.filter((m) => selected.has(m.id)) : []
   const subtitle =
     conn !== 'online'
@@ -142,6 +158,8 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
           ? 'Notes to yourself, on this device'
           : id === fog.GUIDE
             ? 'A built-in guide, on this device only'
+          : person?.bot
+            ? `bot${person.username ? ` · @${person.username}` : ''}`
           : chat.group
           ? `${chat.group.members.length} members`
           : person?.name && person.username
@@ -196,6 +214,19 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
           <IconButton icon="up" label="Older match" onClick={() => setSearch((s) => s && { ...s, i: Math.min(matches.length - 1, s.i + 1) })} />
           <IconButton icon="down" label="Newer match" onClick={() => setSearch((s) => s && { ...s, i: Math.max(0, s.i - 1) })} />
         </header>
+      ) : th ? (
+        <header className="z-10 flex h-16 shrink-0 items-center gap-1 border-b border-line bg-panel px-2">
+          <IconButton icon="back" label={`Back to ${title}`} onClick={() => fog.openThread(null)} />
+          <div className="min-w-0 flex-1 px-2">
+            <p className="flex items-center gap-1.5 truncate leading-tight font-semibold">
+              <Icon name="thread" className="size-4 shrink-0 text-muted" />
+              <span className="truncate">{th.name}</span>
+            </p>
+            <p className="truncate text-sm text-muted">{typing ? 'typing…' : `Thread in ${title}`}</p>
+          </div>
+          {canRename && !left && <IconButton icon="pencil" label="Rename thread" onClick={() => setNaming({ rename: th.id })} />}
+          <IconButton icon="search" label="Search this chat" onClick={() => setSearch({ q: '', i: 0 })} />
+        </header>
       ) : (
         <header className="z-10 flex h-16 shrink-0 items-center gap-1 border-b border-line bg-panel px-2">
           <IconButton icon="back" label="Back to chats" onClick={() => fog.openChat(null)} className="md:hidden" />
@@ -210,7 +241,8 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
             </span>
             <div className="min-w-0">
               <p className="flex items-center gap-1 truncate leading-tight font-semibold">
-                {title}
+                <span className="truncate">{title}</span>
+                {person?.bot && <BotBadge />}
                 {person?.verified && (
                   <span title="Verified safety number">
                     <Icon name="shield" className="size-4 shrink-0 text-emerald-500" />
@@ -233,11 +265,21 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
               <IconButton icon="phone" label="Group voice call" onClick={() => groupCall(false)} className="max-sm:hidden" />
             </>
           )}
+          {!!chat.threads && Object.keys(chat.threads).length > 0 && (
+            <IconButton
+              icon="thread"
+              label="Threads"
+              onClick={(e) => {
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                setThreadList({ x: r.right - 260, y: r.bottom + 4 })
+              }}
+            />
+          )}
           <IconButton icon="search" label="Search this chat" onClick={() => setSearch({ q: '', i: 0 })} className={!chat.group && !fog.isLocalChat(id) ? 'max-sm:hidden' : ''} />
           <IconButton icon="info" label="Chat info" onClick={onInfo} className="max-sm:hidden" />
         </header>
       )}
-      {!!chat.pins?.length && !selected && (
+      {!!chat.pins?.length && !selected && !th && (
         <PinnedBar
           chat={chat}
           idx={pinIdx}
@@ -265,7 +307,13 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
           className="scroll-thin absolute inset-0 overflow-x-hidden overflow-y-auto"
         >
           <div role="log" aria-live="polite" aria-label="Messages" className="flex min-h-full flex-col justify-end px-2 py-3 sm:px-4 lg:px-5">
-            {count === 0 && (id === SAVED ? <SavedIntro /> : <Intro title={title} group={!!chat.group} />)}
+            {th?.root && byId(th.root) && (
+              <button onClick={() => fog.jumpTo(th.root!)} className="mb-3 self-center rounded-2xl bg-black/20 px-4 py-2 text-left text-[13.5px] text-white backdrop-blur-md transition hover:bg-black/30 dark:bg-white/10">
+                <span className="block opacity-75">Thread started from</span>
+                <span className="line-clamp-2">{snippet(byId(th.root)!)}</span>
+              </button>
+            )}
+            {count === 0 && !th && (id === SAVED ? <SavedIntro /> : <Intro title={title} group={!!chat.group} />)}
             {hidden > 0 && (
               <p className="my-2 flex justify-center">
                 <Spinner className="size-5 text-muted" />
@@ -298,6 +346,8 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
                       {sysText(m)}
                       <span className="opacity-70">· {new Date(m.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
                     </button>
+                  ) : m.sys?.k === 'thread' && m.sys.th ? (
+                    <ThreadLink name={chat.threads?.[m.sys.th]?.name ?? m.sys.name ?? 'Thread'} stats={threadStats.get(m.sys.th)} by={m.sys.by} onOpen={() => fog.openThread(m.sys!.th!)} />
                   ) : m.sys ? (
                     <span className="my-2 max-w-[85%] self-center rounded-full bg-black/25 px-3 py-1 text-center text-[13px] text-white backdrop-blur-md dark:bg-white/10">{sysText(m)}</span>
                   ) : (
@@ -319,6 +369,7 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
                       onOpenText={() => setTextFile(m)}
                     />
                   )}
+                  {!thread && rootOf(m.id) && <ThreadLink name={rootOf(m.id)!.name} stats={threadStats.get(rootOf(m.id)!.id)} onOpen={() => fog.openThread(rootOf(m.id)!.id)} mine={m.mine} />}
                 </div>
               )
             })}
@@ -374,13 +425,13 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
             setEditing(null)
           }}
           onEditLast={() => {
-            const last = [...chat.messages].reverse().find((x) => x.mine && x.text && !x.sys)
+            const last = [...msgs].reverse().find((x) => x.mine && x.text && !x.sys)
             if (last) (setReply(null), setEditing(last))
           }}
           onFiles={setFiles}
           onVoice={(att) => {
             stick.current = true
-            fog.sendAtt(id, att, '', reply?.id)
+            fog.sendAtt(id, att, '', reply?.id, thread ?? undefined)
             setReply(null)
           }}
         />
@@ -420,6 +471,13 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
         >
           {!left && <MenuItem icon="reply" label="Reply" onClick={() => (setEditing(null), setReply(menu.m), setMenu(null))} />}
           {menu.m.text && <MenuItem icon="copy" label="Copy text" onClick={() => (copy(menu.m.text), setMenu(null))} />}
+          {!thread && !left && !fog.isLocalChat(id) && !menu.m.sys && (
+            <MenuItem
+              icon="thread"
+              label={rootOf(menu.m.id) ? 'Open thread' : 'Start thread'}
+              onClick={() => (rootOf(menu.m.id) ? fog.openThread(rootOf(menu.m.id)!.id) : setNaming({ root: menu.m }), setMenu(null))}
+            />
+          )}
           {menu.m.mine && menu.m.text && !left && <MenuItem icon="pencil" label="Edit" onClick={() => (setReply(null), setEditing(menu.m), setMenu(null))} />}
           {menu.m.att?.id && fog.isGif(menu.m.att) && menu.m.att.kind !== 'sticker' && <MenuItem icon="image" label="Save GIF" onClick={() => (fog.saveGif(menu.m.att!), setMenu(null))} />}
           {menu.m.att?.id && (menu.m.att.kind === 'sticker' || menu.m.att.kind === 'photo') && (
@@ -436,6 +494,31 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
           {menu.m.mine && !fog.isLocalChat(id) && <MenuItem icon="info" label="Info" onClick={() => (setInfo(menu.m), setMenu(null))} />}
           <MenuItem icon="select" label="Select" onClick={() => (setSelected(new Set([menu.m.id])), setMenu(null))} />
           <MenuItem icon="trash" label="Delete" danger onClick={() => (setDeleting([menu.m]), setMenu(null))} />
+        </Menu>
+      )}
+      {naming && (
+        <NameThread
+          initial={naming.rename ? (chat.threads?.[naming.rename]?.name ?? '') : naming.root ? snippet(naming.root).slice(0, 60) : ''}
+          rename={!!naming.rename}
+          onClose={() => setNaming(null)}
+          onDone={async (name) => {
+            const n = naming
+            setNaming(null)
+            if (n.rename) return void fog.renameThread(id, n.rename, name).catch(() => fog.toast("Couldn't rename the thread. Check your connection."))
+            const tid = await fog.createThread(id, name, n.root?.id).catch(() => null)
+            if (tid) fog.openThread(tid)
+            else fog.toast("Couldn't start the thread. Check your connection.")
+          }}
+        />
+      )}
+      {threadList && (
+        <Menu at={threadList} onClose={() => setThreadList(null)}>
+          {Object.values(chat.threads ?? {})
+            .sort((a, b) => (threadStats.get(b.id)?.last ?? b.ts) - (threadStats.get(a.id)?.last ?? a.ts))
+            .map((t) => (
+              <MenuItem key={t.id} icon="thread" label={`${t.name}${threadStats.get(t.id) ? ` · ${threadStats.get(t.id)!.n}` : ''}`} onClick={() => (fog.openThread(t.id), setThreadList(null))} />
+            ))}
+          {!left && <MenuItem icon="plus" label="New thread" onClick={() => (setNaming({}), setThreadList(null))} />}
         </Menu>
       )}
       {deleting && <DeleteDialog msgs={deleting} chat={chat} title={title} onClose={() => setDeleting(null)} onDone={() => setSelected(null)} />}
@@ -457,7 +540,7 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
           files={files}
           onClose={() => setFiles(null)}
           onSend={(caption, asFile) => {
-            fog.sendFiles(id, files, { caption, reply: reply?.id, asFile })
+            fog.sendFiles(id, files, { caption, reply: reply?.id, asFile, th: thread ?? undefined })
             stick.current = true
             setReply(null)
             setFiles(null)
@@ -465,6 +548,52 @@ export function ChatPane({ id, onInfo }: { id: string; onInfo: () => void }) {
         />
       )}
     </div>
+  )
+}
+
+/** The way into a thread: under the message it started from, or where it was started. */
+function ThreadLink({ name, stats, by, mine, onOpen }: { name: string; stats?: { n: number; last: number }; by?: string; mine?: boolean; onOpen: () => void }) {
+  return (
+    <button
+      onClick={onOpen}
+      className={`mt-1 mb-1 flex max-w-[85%] items-center gap-2 rounded-full bg-black/20 px-3 py-1 text-[13px] text-white backdrop-blur-md transition hover:bg-black/30 dark:bg-white/10 ${mine ? 'self-end' : by ? 'self-center' : 'self-start sm:ml-11'}`}
+    >
+      <Icon name="thread" className="size-4 shrink-0" />
+      <span className="truncate">{by ? `${personName(by)} started “${name}”` : name}</span>
+      <span className="shrink-0 opacity-75">{stats ? `${stats.n} ${stats.n === 1 ? 'message' : 'messages'}` : 'No messages yet'}</span>
+    </button>
+  )
+}
+
+function NameThread({ initial, rename, onClose, onDone }: { initial: string; rename: boolean; onClose: () => void; onDone: (name: string) => void }) {
+  const [name, setName] = useState(initial)
+  const ok = !!name.trim()
+  return (
+    <Dialog
+      title={rename ? 'Rename thread' : 'New thread'}
+      onClose={onClose}
+      actions={
+        <>
+          <Button kind="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button disabled={!ok} onClick={() => onDone(name)}>
+            {rename ? 'Rename' : 'Start thread'}
+          </Button>
+        </>
+      }
+    >
+      <input
+        autoFocus
+        value={name}
+        maxLength={100}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && ok && onDone(name)}
+        placeholder="Thread name"
+        aria-label="Thread name"
+        className="h-11 w-full rounded-xl bg-raised px-3.5 text-base outline-none ring-1 ring-transparent focus:ring-lamp/50"
+      />
+    </Dialog>
   )
 }
 
@@ -1002,6 +1131,7 @@ function Composer(props: {
   const { id, title, reply, editing, onCancel, onSent, onEditLast, onFiles, onVoice } = props
   const chat = useFog((s) => s.chats[id])
   const people = useFog((s) => s.people)
+  const thread = useFog((s) => s.thread)
   const [text, setText] = useState(() => fog.getState().chats[id]?.draft ?? '')
   const [mention, setMention] = useState<{ q: string; i: number } | null>(null)
   const members = chat?.group ? others(chat) : []
@@ -1009,6 +1139,29 @@ function Composer(props: {
   const candidates = mention
     ? members.filter((p) => handle(p) && (personName(p, people[p]).toLowerCase().includes(mention.q) || people[p]?.username?.includes(mention.q))).slice(0, 6)
     : []
+  // Bot commands: type "/" in a chat with a bot (or tap its menu button).
+  const bots = (chat?.group ? members : [id]).filter((p) => people[p]?.bot?.cmds?.length)
+  const allCmds = bots.flatMap((b) => people[b]!.bot!.cmds!.map((c) => ({ bot: b, c })))
+  const [cmdOff, setCmdOff] = useState(false)
+  const [ci, setCi] = useState(0)
+  const [cmdBot, setCmdBot] = useState<string | null>(null)
+  const slash = !editing && !cmdOff && allCmds.length ? /^\/([a-z0-9_-]*)$/i.exec(text) : null
+  const argM = !editing && !cmdOff && allCmds.length ? /^\/([a-z0-9_-]+)\s+([\s\S]*)$/i.exec(text) : null
+  const argCmd = argM ? allCmds.find((x) => x.c.n === argM[1].toLowerCase() && (!cmdBot || x.bot === cmdBot)) : undefined
+  const argWords = argM ? argM[2].split(/\s+/) : []
+  // Options are filled in order; past the last one there's nothing more to suggest.
+  const opt = argCmd?.c.o?.[argWords.length - 1]
+  const val = argWords.at(-1) ?? ''
+  const [sugg, setSugg] = useState<{ l: string; v: string }[]>([])
+  useEffect(() => {
+    setSugg([])
+    if (!opt?.auto || !argCmd) return
+    const t = setTimeout(async () => setSugg(await fog.suggest(id, argCmd.bot, argCmd.c.n, opt.n, val, argM?.[2] ?? val)), 250)
+    return () => clearTimeout(t)
+  }, [opt?.auto, opt?.n, argCmd?.bot, argCmd?.c.n, val, id])
+  const cmdItems = slash ? allCmds.filter((x) => x.c.n.startsWith(slash[1].toLowerCase())).concat(allCmds.filter((x) => !x.c.n.startsWith(slash[1].toLowerCase()) && x.c.n.includes(slash[1].toLowerCase()))).slice(0, 60) : []
+  const choiceItems = opt ? (opt.ch ? opt.ch.filter((ch) => !val || ch.l.toLowerCase().includes(val.toLowerCase()) || ch.v.toLowerCase().startsWith(val.toLowerCase())) : sugg) : []
+  const picker = cmdItems.length ? cmdItems.length : choiceItems.length
   const [emoji, setEmoji] = useState(false)
   const [attachMenu, setAttachMenu] = useState<MenuAt | null>(null)
   const [rec, setRec] = useState<Recording | null>(null)
@@ -1097,13 +1250,32 @@ function Composer(props: {
       return
     }
     if (!t) return
+    sendText(t)
+  }
+  const sendText = (t: string, toBot = cmdBot) => {
     setText('')
     fog.setDraft(id, '')
     setMention(null)
+    setCmdBot(null)
     onSent()
-    fog.sendMessage(id, t, { reply: reply?.id, men: members.filter((p) => handle(p) && t.includes(handle(p)!)), link: link && link !== 'loading' ? link : undefined })
+    // In a group, a command is addressed to its bot (bots there may only answer when mentioned).
+    const men = members.filter((p) => (handle(p) && t.includes(handle(p)!)) || (t.startsWith('/') && p === toBot))
+    fog.sendMessage(id, t, { reply: reply?.id, men, link: link && link !== 'loading' ? link : undefined, th: thread ?? undefined })
     setLink(null)
     setDismissed(null)
+  }
+  const pickCmd = (x: (typeof allCmds)[number]) => {
+    if (!x.c.o?.length) return sendText(`/${x.c.n}`, x.bot)
+    setCmdBot(x.bot)
+    caret.current = x.c.n.length + 2
+    setText(`/${x.c.n} `)
+    setCi(0)
+  }
+  const pickChoice = (v: string) => {
+    const head = text.slice(0, text.length - val.length)
+    caret.current = head.length + v.length + 1
+    setText(`${head}${v} `)
+    setCi(0)
   }
   const pickMention = (p: string) => {
     const el = ref.current!
@@ -1161,7 +1333,7 @@ function Composer(props: {
                 : (a) => {
                     setEmoji(false)
                     onSent()
-                    fog.sendAtt(id, a, '', reply?.id)
+                    fog.sendAtt(id, a, '', reply?.id, thread ?? undefined)
                   }
             }
           />
@@ -1181,6 +1353,49 @@ function Composer(props: {
               )}
             </div>
             <IconButton icon="close" label="Remove link preview" onClick={() => setDismissed(typedUrl)} />
+          </div>
+        )}
+        {picker > 0 && !rec && (
+          <div role="listbox" aria-label={cmdItems.length ? 'Bot commands' : `Choices for ${opt?.n}`} className="menu-in scroll-thin absolute bottom-full left-0 z-30 mb-2 max-h-[min(360px,50dvh)] w-[min(420px,100%)] origin-bottom-left overflow-y-auto rounded-2xl bg-panel p-1.5 shadow-[0_12px_40px_-8px_rgba(0,0,0,0.35)] ring-1 ring-black/5 dark:ring-white/10">
+            {!cmdItems.length && opt && (
+              <p className="px-2 pt-1 pb-1.5 text-[13px] text-muted">
+                <span className="font-semibold text-ink">{opt.n}</span>
+                {opt.d && ` · ${opt.d}`}
+              </p>
+            )}
+            {cmdItems.length
+              ? cmdItems.map((x, k) => (
+                  <button
+                    key={`${x.bot}/${x.c.n}`}
+                    role="option"
+                    aria-selected={k === ci % picker}
+                    onMouseDown={(e) => (e.preventDefault(), pickCmd(x))}
+                    className={`flex w-full items-center gap-3 rounded-xl px-2 py-1.5 text-left ${k === ci % picker ? 'bg-hover' : ''}`}
+                  >
+                    {bots.length > 1 && <Avatar id={x.bot} name={personName(x.bot, people[x.bot])} src={people[x.bot]?.avatar} size={28} />}
+                    <span className="min-w-0 flex-1">
+                      <span className="font-semibold">/{x.c.n}</span>
+                      {x.c.o?.map((o) => (
+                        <span key={o.n} className="ml-1.5 font-mono text-[13px] text-muted">
+                          {o.req ? `<${o.n}>` : `[${o.n}]`}
+                        </span>
+                      ))}
+                      {x.c.d && <span className="block truncate text-[13.5px] text-muted">{x.c.d}</span>}
+                    </span>
+                  </button>
+                ))
+              : choiceItems.map((ch, k) => (
+                  <button
+                    key={ch.v}
+                    role="option"
+                    aria-selected={k === ci % picker}
+                    onMouseDown={(e) => (e.preventDefault(), pickChoice(ch.v))}
+                    className={`flex w-full items-center gap-3 rounded-xl px-2 py-1.5 text-left ${k === ci % picker ? 'bg-hover' : ''}`}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{ch.l}</span>
+                    {ch.l !== ch.v && <span className="truncate font-mono text-[13px] text-muted">{ch.v}</span>}
+                  </button>
+                ))}
           </div>
         )}
         {candidates.length > 0 && (
@@ -1214,17 +1429,51 @@ function Composer(props: {
               >
                 <Icon name="smile" />
               </button>
+              {bots.length > 0 && !editing && (
+                <button
+                  onClick={() => (setCmdOff(false), setText(text.startsWith('/') ? '' : '/'), ref.current?.focus())}
+                  aria-label="Bot commands"
+                  title="Bot commands"
+                  className={`-ml-2 grid size-12 shrink-0 place-items-center rounded-full font-mono text-[20px] font-semibold transition ${slash ? 'text-lamp' : 'text-muted hover:text-ink'}`}
+                >
+                  /
+                </button>
+              )}
               <textarea
                 ref={ref}
                 value={text}
                 rows={1}
                 onChange={(e) => {
                   setText(e.target.value)
+                  if (!e.target.value.startsWith('/')) (setCmdOff(false), setCmdBot(null))
+                  setCi(0)
                   if (!editing) fog.typing(id)
                   const at = chat?.group && /(?:^|\s)@([\p{L}\p{N}_]*)$/u.exec(e.target.value.slice(0, e.target.selectionStart ?? undefined))
                   setMention(at ? { q: at[1].toLowerCase(), i: 0 } : null)
                 }}
                 onKeyDown={(e) => {
+                  if (picker && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                    e.preventDefault()
+                    setCi((i) => (i + (e.key === 'ArrowDown' ? 1 : picker - 1)) % picker)
+                    return
+                  }
+                  if (picker && e.key === 'Tab') {
+                    e.preventDefault()
+                    if (cmdItems.length) pickCmd(cmdItems[ci % picker])
+                    else pickChoice(choiceItems[ci % picker].v)
+                    return
+                  }
+                  if (picker && e.key === 'Enter' && !e.shiftKey && (choiceItems.length ? !cmdItems.length && val !== choiceItems[ci % picker].v : cmdItems[ci % picker].c.n !== slash?.[1].toLowerCase())) {
+                    e.preventDefault()
+                    if (cmdItems.length) pickCmd(cmdItems[ci % picker])
+                    else pickChoice(choiceItems[ci % picker].v)
+                    return
+                  }
+                  if (picker && e.key === 'Escape') {
+                    e.stopPropagation()
+                    setCmdOff(true)
+                    return
+                  }
                   if (candidates.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
                     e.preventDefault()
                     setMention((m) => m && { ...m, i: (m.i + (e.key === 'ArrowDown' ? 1 : candidates.length - 1)) % candidates.length })
@@ -1324,7 +1573,7 @@ function Composer(props: {
           onSend={(poll) => {
             setPolling(false)
             onSent()
-            fog.sendMessage(id, '', { poll, reply: reply?.id })
+            fog.sendMessage(id, '', { poll, reply: reply?.id, th: thread ?? undefined })
           }}
         />
       )}

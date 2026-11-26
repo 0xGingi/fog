@@ -56,6 +56,7 @@ const paths: Record<string, string> = {
   mic: 'M12 15a3 3 0 003-3V6a3 3 0 00-6 0v6a3 3 0 003 3zM6 11a6 6 0 0012 0M12 17v4',
   forward: 'M14 7l5 5-5 5M19 12h-9a5 5 0 00-5 5v1',
   select: 'M12 21a9 9 0 100-18 9 9 0 000 18zM8 12.5l2.5 2.5L16 9.5',
+  thread: 'M4 5h16v10H9l-5 4V5zM8 9h8M8 12h5',
   users: 'M9 11a3.5 3.5 0 100-7 3.5 3.5 0 000 7zM2.5 20a6.5 6.5 0 0113 0M16 4.5a3.5 3.5 0 010 6.5M18 14a6 6 0 013.5 6',
   plus: 'M12 5v14M5 12h14',
   file: 'M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8zM14 3v5h5',
@@ -110,6 +111,13 @@ export function Avatar({ id, name, src, size = 48 }: { id: string; name?: string
     </div>
   )
 }
+
+/** Marks a bot account (it says so in its own encrypted profile). */
+export const BotBadge = () => (
+  <span className="shrink-0 rounded-md bg-lamp/15 px-1.5 py-px text-[11px] leading-4 font-semibold text-lamp" title="Bot">
+    bot
+  </span>
+)
 
 export function Button({ children, kind = 'primary', className = '', ...p }: React.ButtonHTMLAttributes<HTMLButtonElement> & { kind?: 'primary' | 'ghost' | 'danger' | 'soft' }) {
   const k = {

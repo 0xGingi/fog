@@ -7,7 +7,9 @@ import { renderSVG } from 'uqr'
 import { fmtTime, snippet, Ticks } from './bubble'
 import { avatarFrom, download, useLocalUrl } from './media'
 import * as db from './db'
-import { Avatar, Button, copy, Dialog, Drawer, Icon, IconButton, Menu, MenuItem, Row, Section, Spinner, Toaster, Toggle, usePressMenu, type MenuAt } from './ui'
+import { BotDialogs } from './botui'
+import { LinkCheck } from './markdown'
+import { Avatar, BotBadge, Button, copy, Dialog, Drawer, Icon, IconButton, Menu, MenuItem, Row, Section, Spinner, Toaster, Toggle, usePressMenu, type MenuAt } from './ui'
 function fmtListTime(ts: number) {
   const d = new Date(ts)
   const now = new Date()
@@ -35,6 +37,8 @@ export function App() {
         <Main />
       )}
       {phase === 'app' && <CallScreen />}
+      {phase === 'app' && <BotDialogs />}
+      <LinkCheck />
       <Toaster />
     </>
   )
@@ -828,6 +832,7 @@ function Sidebar({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-2">
                     <span className="truncate font-semibold">{chatTitle(chat, people[chat.id])}</span>
+                    {!chat.group && people[chat.id]?.bot && <BotBadge />}
                     <span className="ml-auto shrink-0 text-xs text-muted">{fmtListTime(m.ts)}</span>
                   </div>
                   <p className="truncate text-[15px] text-muted">
@@ -993,6 +998,7 @@ function ChatRow({ chat, active, compact }: { chat: Chat; active: boolean; compa
           <div className="flex items-baseline gap-2">
             {chat.group && <Icon name="users" className="size-4 shrink-0 self-center text-muted" />}
             <span className="truncate font-semibold">{title}</span>
+            {person?.bot && <span className="self-center"><BotBadge /></span>}
             {muted && <Icon name="bellOff" className="size-4 shrink-0 self-center text-muted" />}
             {chat.timer && <Icon name="timer" className="size-4 shrink-0 self-center text-muted" />}
             <span className={`ml-auto flex shrink-0 items-center gap-1 text-xs ${unread && !muted ? 'text-lamp' : 'text-muted'}`}>

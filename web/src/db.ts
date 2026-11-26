@@ -5,12 +5,19 @@
 // PBKDF2-SHA256 600k) and, optionally, by a passkey's PRF output run through HKDF (Touch ID / Face ID /
 // Windows Hello). Locking = reloading the page, which drops every key from memory.
 import { argon2id } from './core/fog_core.js'
-const dbp = new Promise<IDBDatabase>((res, rej) => {
-  const r = indexedDB.open('fog', 1)
-  r.onupgradeneeded = () => r.result.createObjectStore('kv')
-  r.onsuccess = () => res(r.result)
-  r.onerror = () => rej(r.error)
-})
+let dbp: Promise<IDBDatabase> | null = null
+const idb = () =>
+  (dbp ??= new Promise<IDBDatabase>((res, rej) => {
+    const r = indexedDB.open('fog', 1)
+    r.onupgradeneeded = () => r.result.createObjectStore('kv')
+    r.onsuccess = () => res(r.result)
+    r.onerror = () => rej(r.error)
+  }))
+
+/** Somewhere else to keep the records instead of IndexedDB: the bot daemon (bot/store.ts) uses a folder. */
+export type Store = { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void>; del(key: string): Promise<void>; keys(): Promise<string[]>; clear(): Promise<void> }
+let store: Store | null = null
+export const useStore = (s: Store) => void (store = s)
 
 const subtle = crypto.subtle
 const te = new TextEncoder()
@@ -30,7 +37,16 @@ let dekRaw: Uint8Array<ArrayBuffer> | null = null
 export class StorageError extends Error {}
 
 async function raw<T>(key: string, value?: unknown): Promise<T | undefined> {
-  const db = await dbp
+  if (store) {
+    try {
+      if (value === undefined) return (await store.get(key)) as T | undefined
+      await (value === null ? store.del(key) : store.put(key, value))
+      return
+    } catch (e) {
+      throw new StorageError(String(e))
+    }
+  }
+  const db = await idb()
   return new Promise((res, rej) => {
     const fail = (e: unknown) => rej(new StorageError(String(e)))
     try {
@@ -64,25 +80,27 @@ export async function kv<T>(key: string, value?: T | null): Promise<T | undefine
     const v = await raw<unknown>(key)
     if (isSealed(v)) return (await unseal(key, v)) as T
     // With the lock on, everything we wrote is sealed: a plaintext record was planted, so ignore it.
-    return v !== undefined && key !== LOCK && (await lockOn) ? undefined : (v as T | undefined)
+    return v !== undefined && key !== LOCK && (await lockIsOn()) ? undefined : (v as T | undefined)
   }
   // Seal before opening the transaction: IndexedDB transactions don't survive awaiting other work.
   return raw(key, value !== null && dek && key !== LOCK ? await seal(key, value) : value)
 }
 
 export async function kvClear() {
-  const db = await dbp
+  lockOn = Promise.resolve(false)
+  dek = dekRaw = null
+  if (store) return store.clear()
+  const db = await idb()
   await new Promise((res) => {
     const tx = db.transaction('kv', 'readwrite')
     tx.objectStore('kv').clear()
     tx.oncomplete = res
   })
-  lockOn = Promise.resolve(false)
-  dek = dekRaw = null
 }
 
 async function allKeys(): Promise<string[]> {
-  const db = await dbp
+  if (store) return (await store.keys()).filter((k) => k !== LOCK)
+  const db = await idb()
   return new Promise((res) => {
     const r = db.transaction('kv').objectStore('kv').getAllKeys()
     r.onsuccess = () => res((r.result as string[]).filter((k) => k !== LOCK))
@@ -91,7 +109,8 @@ async function allKeys(): Promise<string[]> {
 
 // ---------- app lock ----------
 const lockRecord = () => raw<LockRecord>(LOCK)
-let lockOn: Promise<boolean> = lockRecord().then((l) => !!l)
+let lockOn: Promise<boolean> | null = null
+const lockIsOn = () => (lockOn ??= lockRecord().then((l) => !!l))
 export const lockEnabled = async () => !!(await lockRecord())
 export const passkeyEnabled = async () => !!(await lockRecord())?.prf
 export const isUnlocked = () => !!dek

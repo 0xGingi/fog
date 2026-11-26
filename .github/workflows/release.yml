@@ -226,6 +226,46 @@ jobs:
           gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "Fog $GITHUB_REF_NAME" --notes "Fog $GITHUB_REF_NAME"
           gh release upload "$GITHUB_REF_NAME" Fog-Android.apk --clobber
 
+  # fog-bot: run a Fog account as a bot (see bot/README.md). One self-contained binary per platform,
+  # cross-compiled by bun from one runner, attached to the release.
+  bot:
+    name: fog-bot
+    needs: core
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fog-core
+          path: web/src/core
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - name: Build
+        run: |
+          for t in linux-x64 linux-arm64 darwin-arm64 darwin-x64 windows-x64; do
+            ext=""; [ "$t" = windows-x64 ] && ext=".exe"
+            bun build --compile --minify --target="bun-$t" bot/main.ts --outfile "dist/fog-bot-$t$ext"
+          done
+          ls -la dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fog-bot
+          path: dist/
+      - name: Attach to the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for _ in $(seq 1 15); do gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 && break; sleep 60; done
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "Fog $GITHUB_REF_NAME" --notes "Fog $GITHUB_REF_NAME"
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+
   # iOS: signed for the App Store and uploaded to TestFlight. Switches on once the Apple secrets
   # exist (see README); until then it only says it's skipping.
   ios:

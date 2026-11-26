@@ -214,6 +214,15 @@ body {
     transform: translateY(10px) scale(0.97);
   }
 }
+/* A bot reply still being written. */
+.caret {
+  animation: caret 1s steps(2, jump-none) infinite;
+}
+@keyframes caret {
+  50% {
+    opacity: 0.15;
+  }
+}
 .flash {
   animation: flash 1.4s ease;
 }

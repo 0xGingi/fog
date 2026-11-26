@@ -127,9 +127,21 @@ const chunkLayout = (size: number) => {
 
 /** Send one part of a resumable upload, with progress. */
 function putPart(id: string, offset: number, data: Uint8Array<ArrayBuffer>, progress: (sent: number) => void) {
+  return put(`${SERVER.origin}/blob/${id}?offset=${offset}`, data, progress)
+}
+/** PUT with upload progress (XMLHttpRequest has it, fetch doesn't). The bot daemon has only fetch. */
+function put(url: string, data: Uint8Array<ArrayBuffer>, progress: (sent: number) => void) {
+  if (typeof XMLHttpRequest === 'undefined')
+    return fetch(url, { method: 'PUT', body: data }).then(
+      (r) => {
+        if (r.status >= 300) throw Object.assign(new Error(`upload ${r.status}`), { status: r.status })
+        progress(data.length)
+      },
+      () => Promise.reject(new Error('upload failed')),
+    )
   return new Promise<void>((res, rej) => {
     const x = new XMLHttpRequest()
-    x.open('PUT', `${SERVER.origin}/blob/${id}?offset=${offset}`)
+    x.open('PUT', url)
     x.upload.onprogress = (e) => progress(e.loaded)
     x.onload = () => (x.status < 300 ? res() : rej(Object.assign(new Error(`upload ${x.status}`), { status: x.status })))
     x.onerror = () => rej(new Error('upload failed'))
@@ -195,14 +207,7 @@ export async function upload(att: Att, reserve: (size: number) => Promise<string
     }
     const { out, key } = await encrypt(await blob.arrayBuffer())
     const id = await reserve(out.length)
-    await new Promise<void>((res, rej) => {
-      const x = new XMLHttpRequest()
-      x.open('PUT', `${SERVER.origin}/blob/${id}`)
-      x.upload.onprogress = (e) => e.lengthComputable && setT(att.lid, { p: e.loaded / e.total, dir: 'up' })
-      x.onload = () => (x.status < 300 ? res() : rej(new Error(`upload ${x.status}`)))
-      x.onerror = () => rej(new Error('upload failed'))
-      x.send(out)
-    })
+    await put(`${SERVER.origin}/blob/${id}`, out, (sent) => setT(att.lid, { p: sent / out.length, dir: 'up' }))
     setT(att.lid, null)
     return { ...att, id, key }
   } catch (e) {

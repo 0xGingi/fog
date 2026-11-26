@@ -26,7 +26,7 @@
 
 ---
 
-Fog is a self-hostable, end-to-end encrypted messenger built on Signal's Rust `libsignal` crate (compiled to WebAssembly for the browser and native Rust for future bots/clients). The server is a minimal Rust relay that stores prekeys and queued ciphertext — it holds no user keys and never sees plaintext.
+Fog is a self-hostable, end-to-end encrypted messenger built on Signal's Rust `libsignal` crate (compiled to WebAssembly for the browser, the apps and bots). The server is a minimal Rust relay that stores prekeys and queued ciphertext — it holds no user keys and never sees plaintext.
 
 ## Features
 
@@ -36,6 +36,7 @@ Fog is a self-hostable, end-to-end encrypted messenger built on Signal's Rust `l
 - **Voice & video calls:** End-to-end encrypted 1:1 and group calls (up to 8 people) with screen sharing (fitted, zoomable, tap to hide the controls). Calls are relayed through your own server's TURN by default, so the people you call never see your IP address; group calls always are. On phones, an incoming call rings even when the app is closed.
 - **Private groups:** Up to 50 members over pairwise Signal sessions with signed group state and fork detection.
 - **Encrypted profiles & privacy controls:** Display name and avatar are shared end-to-end encrypted only with people you message. Includes Message Requests for strangers, silent blocking, safety number verification (numbers + QR scan), and an optional App Lock (passcode and/or passkey).
+- **Bots and AI agents:** Run any Fog account as a bot with [`fog-bot`](bot/README.md), which keeps the keys on your machine and gives your bot a local HTTP API (there's also a [skill](bot/skill/fog-bot/SKILL.md) that teaches AI agents to build on it). Bots get a badge, a `/` command menu (with choices and live suggestions), buttons, dropdowns, forms, cards, Markdown (tables, code, lists), replies that stream in as they're written, and messages only one group member sees. [Hermes Agent](https://github.com/NousResearch/hermes-agent) connects with the [hermes-fog](https://github.com/0xGingi/hermes-fog) plugin. The server can't tell a bot from a person.
 - **Installable web app:** Progressive Web App (PWA) with light/dark themes, adjustable text size, notification sounds, keyboard and screen-reader accessibility, long-press touch menus, and paged rendering for long histories.
 
 ## Security Model
@@ -54,6 +55,7 @@ Fog is a self-hostable, end-to-end encrypted messenger built on Signal's Rust `l
 | **Voice & Video Calls** | WebRTC DTLS-SRTP media encryption with SDP offers/answers (including DTLS fingerprints) carried inside the Signal session so the server cannot MITM keys. Self-hosted STUN/TURN means no third-party STUN provider learns who is calling; **Relay all calls** (on by default) hides your IP from the people you call. Group calls are a mesh of the same encrypted connections, always relayed: a group can include people you've never met. Their signalling (ring, join, leave) travels as end-to-end encrypted group messages, so the server doesn't learn who's in a call. |
 | **Chat Backup** | On the main device, once a day when something changed, the chat history (messages, contacts, groups, profile; attachments as their encrypted pointers) is gzipped and encrypted with **AES-256-GCM** under a key derived from the recovery phrase (HKDF-SHA256, `fog/backup/v1`), then uploaded like an attachment. The server keeps only the latest one and sees only its size. Restoring the account from the phrase on a new device downloads and decrypts it. Only an upload the account reserved as a backup can become one. Turning backups off deletes the server's copy. |
 | **Push Notifications** | Phone apps only. When a message or call arrives while Fog is closed or in the background, the server sends a push through Apple (APNs) or Google (FCM) that says only "New message": no sender, chat or content, which still travel only over the encrypted connection once Fog opens. Senders mark which messages are worth a push (messages and incoming calls, not receipts or typing), so the server learns that one bit about sealed messages, as in Signal. Apple or Google learn that your device got something, and when. Turn notifications off in Settings and the token is deleted from the server. Incoming calls ring: on iPhone a time-sensitive "Incoming call" notification with a ringtone the app generates on the device; on Android a full-screen ringing screen over the lock screen. Answering always needs the phone unlocked first, so nothing of Fog shows on a locked phone. (CallKit isn't used: Fog's calls run in the web view, whose microphone iOS cuts while the phone is locked.) |
+| **Bots** | A bot is an ordinary account: `fog-bot` runs the same client engine as the app, with the keys on the bot owner's machine, so bot chats are end-to-end encrypted like any other. Its badge, description and commands travel in its encrypted profile. Taps on its buttons and form answers are end-to-end encrypted messages to the bot alone, and the bot only receives taps on buttons it really sent. Its local API listens on 127.0.0.1 behind a token. |
 | **Link Previews** | **Off by default** in Privacy settings. When enabled, fetched by the sender's Fog server with SSRF hardening (public IPs only, DNS-pinned resolution, re-checked redirects, 512 KB / 6 s limits) and embedded inside the encrypted message so recipients never contact the target site. |
 | **App Lock (At Rest)** | Optional encryption of all local IndexedDB data (keys, chats, cached attachments) under a random AES-256-GCM data key wrapped by your passcode (**Argon2id**, 64 MiB / 3 passes) and/or a **WebAuthn PRF passkey** (HKDF-SHA256). Auto-lock reloads the page to clear all keys from memory. |
 | **Web Hardening** | Strict Content Security Policy (as a header and in the page), reproducible builds you can check against the live site (see [Verifying the web app](#verifying-the-web-app)), a desktop app that ships the client instead of downloading it each visit, self-hosted fonts (zero third-party requests), single-tab key ownership via Web Locks, and atomic persistence of ratchet state before acknowledging messages. |
@@ -154,6 +156,7 @@ With Docker Compose, put the key files in `./push/` next to `compose.yaml` (it's
 ├── server/   Rust relay (fog-server) built with axum + SQLite.
 │             Handles WebSocket auth, prekey bundles, sealed delivery, encrypted blobs,
 │             SSRF-hardened link previews, built-in dev STUN, and serving the web bundle.
+├── bot/      fog-bot: runs an account as a bot with the client engine (Bun) and a local HTTP API.
 ├── web/      React 19 + TypeScript + Vite + Tailwind CSS 4 client (managed with Bun).
 │             index.html is the getfog.org landing page; app/index.html is the app.
 │             src-tauri/ holds the desktop shell.
@@ -295,11 +298,10 @@ Deliberate architectural shortcuts are marked `ponytail:` in the source code so 
 
 *Not planned: GIF search from a catalog. Tenor's API is gone, and GIPHY and KLIPY require each device to contact them directly (no proxy), which would hand users' IPs and searches to an ad/tracking company. Fog has saved GIFs instead.*
 
-**First-class Agents & Bots (Hermes, OpenClaw)**
-In Fog, a bot is just a regular account with its own identity key, so it automatically gets full E2EE and every client feature:
-1. **`fog-bot` daemon:** Native Rust daemon built on `fog-core` holding bot keys and exposing a local HTTP API shaped like the Telegram Bot API (`getUpdates`, webhooks, `sendMessage`, `editMessageText`, `sendChatAction`, inline keyboards) for drop-in compatibility with existing Telegram adapters.
-2. **Native plugins:** Thin channel/platform plugins for OpenClaw and Hermes over the daemon.
-3. **Client UX:** Bot badges, interactive buttons, Markdown rendering, streamed edits for token-by-token replies, and QR/link "add an agent" onboarding.
+**Agents & bots**
+- Threads in groups (so an agent can keep one conversation per topic, like Discord threads)
+- Bots in group voice calls (listen and speak)
+- An OpenClaw channel plugin over the same API
 
 ## License
 

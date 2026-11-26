@@ -9,9 +9,25 @@ export { new_mnemonic as newPhrase, valid_mnemonic as validPhrase }
 
 export type Status = 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
 export type CallRecord = { out: boolean; video: boolean; dur?: number; missed?: boolean; declined?: boolean; group?: boolean }
-export type Sys = { k: 'create' | 'add' | 'remove' | 'leave' | 'rename' | 'decrypt' | 'timer' | 'pin' | 'call' | 'fork'; by: string; who?: string[]; name?: string; secs?: number; call?: CallRecord }
+export type Sys = { k: 'create' | 'add' | 'remove' | 'leave' | 'rename' | 'decrypt' | 'timer' | 'pin' | 'call' | 'fork' | 'thread'; by: string; who?: string[]; name?: string; secs?: number; call?: CallRecord; /** k 'thread': which one. */ th?: string }
+/** A side conversation in a chat: started from a message (`root`), or on its own (like a topic). */
+export type Thread = { id: string; name: string; root?: string; by: string; ts: number; v: number }
 export type Poll = { q: string; o: string[]; multi?: boolean }
 export type LinkPreview = { url: string; title?: string; desc?: string; site?: string; img?: string }
+// ---------- bots ----------
+/** A button under a bot's message: `d` goes back to the bot when tapped; `u` opens a link instead. */
+export type Btn = { l: string; d?: string; u?: string; s?: 'primary' | 'danger' | 'success' }
+/** A dropdown under a bot's message (it takes a whole row). */
+export type Sel = { sel: string; ph?: string; o: { l: string; v: string; d?: string; on?: boolean }[]; min?: number; max?: number }
+export type Row = Btn[] | Sel
+/** A form a bot asks you to fill in after a tap (shown as a dialog). */
+export type Form = { id: string; title: string; f: { id: string; l: string; ph?: string; long?: boolean; secret?: boolean; req?: boolean; min?: number; max?: number }[] }
+/** A frame around a bot's message: title, accent colour and footer. */
+export type Card = { title?: string; color?: string; footer?: string }
+/** A command a bot takes, with its options (choices, or suggestions the bot gives as you type). */
+export type BotCmd = { n: string; d: string; o?: { n: string; d: string; req?: boolean; ch?: { l: string; v: string }[]; auto?: boolean }[] }
+/** A bot's public card, inside its encrypted profile: the server doesn't know who's a bot. */
+export type BotInfo = { about?: string; cmds?: BotCmd[] }
 export type Msg = {
   id: string
   mine: boolean
@@ -40,6 +56,18 @@ export type Msg = {
   link?: LinkPreview
   /** Poll votes by person id ('me' for ours): chosen option indexes. */
   votes?: Record<string, number[]>
+  /** Bots: Markdown text, buttons/dropdowns, a card frame. */
+  md?: boolean
+  kb?: Row[]
+  card?: Card
+  /** Still being written (a streamed reply): edits don't count as edits. */
+  live?: boolean
+  /** No notification or sound. */
+  quiet?: boolean
+  /** Shown to one group member only: their id. */
+  only?: string
+  /** In this thread (not the main conversation). */
+  th?: string
 }
 export type Group = {
   members: string[]
@@ -74,11 +102,13 @@ export type Chat = {
   pins?: string[]
   /** Unread mentions of us. */
   mentions?: number
+  /** Side conversations, by id. */
+  threads?: Record<string, Thread>
   /** From someone we haven't accepted yet: no receipts, no ringing, no notifications. */
   request?: boolean
 }
-export type Person = { username?: string | null; name?: string; avatar?: string; sent?: number; /** Their sealed-sender access key. */ ak?: string; /** Safety number confirmed in person. */ verified?: boolean }
-export type Profile = { name: string; avatar?: string; v: number }
+export type Person = { username?: string | null; name?: string; avatar?: string; sent?: number; /** Their sealed-sender access key. */ ak?: string; /** Safety number confirmed in person. */ verified?: boolean; /** A bot, and what it offers. */ bot?: BotInfo }
+export type Profile = { name: string; avatar?: string; v: number; bot?: BotInfo }
 export type Settings = { readReceipts: boolean; typing: boolean; sounds: boolean; theme: 'system' | 'light' | 'dark'; textSize: number; linkPreviews: boolean; relayCalls: boolean; autoLock: number; lockPrompted?: boolean; /** Encrypted chat backup to the server (main device; on unless turned off). */ backup?: boolean; /** Desktop app: native notifications. */ notifications?: boolean; /** Show the sender and text in notifications (off: just "New message"). */ previews?: boolean; /** Desktop layout: chat list width, or folded to an avatar rail. */ sidebar?: number; sidebarCollapsed?: boolean }
 export type State = {
   phase: 'loading' | 'locked' | 'unlock' | 'welcome' | 'username' | 'app'
@@ -101,6 +131,11 @@ export type State = {
   devices: DeviceInfo[]
   /** Chat backup (main device): when the last one was made, and whether one is being made now. */
   backup: { at: number | null; busy: boolean }
+  /** A bot answered a tap with something to read, or a form to fill in. */
+  alert: { text: string; at: number; from: string } | null
+  form: { chat: string; msg: string; bot: string; form: Form } | null
+  /** The thread open in the active chat (null: its main conversation). */
+  thread: string | null
 }
 export type DeviceInfo = { id: number; name: string | null; created: number; seen: number; ready: boolean }
 
@@ -108,7 +143,7 @@ export type DeviceInfo = { id: number; name: string | null; created: number; see
 type WireAtt = Omit<Att, 'lid'>
 // Payloads inside the encryption. The server never sees these. `g` scopes a payload to a group.
 type Payload = (
-  | { t: 'text'; id: string; text: string; ts: number; reply?: string; att?: WireAtt; fwd?: boolean; ttl?: number; men?: string[]; poll?: Poll; link?: LinkPreview }
+  | { t: 'text'; id: string; text: string; ts: number; reply?: string; att?: WireAtt; fwd?: boolean; ttl?: number; men?: string[]; poll?: Poll; link?: LinkPreview; md?: 1; kb?: Row[]; card?: Card; live?: 1; quiet?: 1; /** Sent to one group member only (to our devices: which one). */ only?: 1 | string; th?: string }
   | { t: 'vote'; id: string; c: number[] }
   /** `to`: only that device of the recipient acts on it. 'elsewhere': answered or declined on another of our devices. */
   /** 'screen': the sender started (`on`) or stopped sharing their screen, so the other side shows it whole.
@@ -119,9 +154,19 @@ type Payload = (
   | { t: 'typing' }
   | { t: 'reset' }
   | { t: 'react'; id: string; emoji: string | null }
-  | { t: 'edit'; id: string; text: string }
+  /** `kb`/`card`: replaced (null removes). `live`: the message is still being written (1) or done (0). */
+  | { t: 'edit'; id: string; text: string; kb?: Row[] | null; card?: Card | null; live?: 0 | 1 }
+  /** Bots: a tap on a button (`d`), a dropdown choice (`d` = its id, `v`), or a filled-in form (`d` = its id, `f`). */
+  | { t: 'btn'; id: string; d: string; q: string; v?: string[]; f?: Record<string, string> }
+  /** The bot's answer to a tap: something to show, or a form to fill in. */
+  | { t: 'btnack'; q: string; text?: string; alert?: 1; form?: Form }
+  /** A thread was started, or renamed (newer `v` wins). */
+  | { t: 'thread'; id: string; name: string; root?: string; v: number }
+  /** Bots: suggestions for a command option as you type it, and the bot's answer. */
+  | { t: 'auto'; q: string; cmd: string; opt: string; val: string; /** everything typed after the command */ args?: string }
+  | { t: 'autoans'; q: string; o: { l: string; v: string }[] }
   | { t: 'delete'; id: string }
-  | { t: 'profile'; name: string; avatar?: string; ak?: string }
+  | { t: 'profile'; name: string; avatar?: string; ak?: string; bot?: BotInfo }
   /** "Your access key stopped working, please re-share it." */
   | { t: 'akreq' }
   | { t: 'group'; name: string; avatar?: string; members: string[]; owner: string; v: number; sig: string }
@@ -169,6 +214,9 @@ let state: State = {
   blocked: [],
   devices: [],
   backup: { at: null, busy: false },
+  alert: null,
+  form: null,
+  thread: null,
 }
 const listeners = new Set<() => void>()
 function set(patch: Partial<State>) {
@@ -495,6 +543,8 @@ export function verifySafetyCode(peer: string, scanned: string) {
 }
 export const setVerified = (peer: string, verified: boolean) => setPerson(peer, { verified })
 
+/** Resolves once connected to the server. */
+export const waitOnline = () => waitFor(() => state.conn === 'online')
 function waitFor(cond: () => boolean): Promise<void> {
   return new Promise((res) => {
     if (cond()) return res()
@@ -688,6 +738,7 @@ async function refreshDevices() {
 /** A label for this device in the main device's list. */
 function deviceName() {
   const ua = navigator.userAgent
+  if (ua === 'fog-bot') return 'Fog bot'
   // iPhones say "like Mac OS X", and iPads can report a Mac: check them first.
   const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)
   const os = /iPhone/.test(ua) ? 'iPhone' : ipad ? 'iPad' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'this computer'
@@ -996,7 +1047,7 @@ function deliver(peer: string, p: Payload) {
     // (The server learns this one bit per message; Signal sends the same.)
     // Incoming calls ring (a 1:1 offer, or a group call starting); offers inside a group call don't.
     const call = p.t === 'call' && ((p.k === 'offer' && !p.gc) || p.k === 'ring')
-    const urgent = p.t === 'text' || call
+    const urgent = (p.t === 'text' && !p.quiet) || call
     let ak = self ? undefined : state.people[peer]?.ak
     let akRequest = false
     const targets = () => Array.from(acct!.session_devices(peer)).filter((d) => !(self && d === acct!.device))
@@ -1051,6 +1102,13 @@ function mirror(p: Payload) {
   if (otherDevices().length) deliver(acct!.id, p).catch(() => {})
 }
 
+/** Send to one person in a chat (in a group: tagged as group traffic, so it shows in the group). */
+async function deliverTo(chatId: string, who: string, p: Payload) {
+  const c = state.chats[chatId]
+  if (!c || c.group?.left || !others(c).includes(who)) throw new Error('not in this chat')
+  await deliver(who, c.group ? { ...p, g: chatId, gv: c.group.v, gh: c.group.hash } : p)
+}
+
 /** Send to a chat: one peer, or every other group member (each with its own Signal session). */
 async function deliverChat(chatId: string, p: Payload) {
   const c = state.chats[chatId]
@@ -1081,23 +1139,29 @@ async function shareProfile(peer: string) {
   if (isBlocked(peer)) return
   const p = state.profile
   if (state.people[peer]?.sent === p.v) return
-  await deliver(peer, { t: 'profile', name: p.name, avatar: p.avatar, ak: myAk })
+  await deliver(peer, { t: 'profile', name: p.name, avatar: p.avatar, ak: myAk, bot: p.bot })
   setPerson(peer, { sent: p.v })
 }
 
 const wire = ({ lid: _, ...a }: Att): WireAtt => a
 
-export async function sendMessage(chat: string, text: string, opts: { reply?: string; att?: Att; fwd?: boolean; men?: string[]; poll?: Poll; link?: LinkPreview } = {}) {
+export type SendOpts = { reply?: string; att?: Att; fwd?: boolean; men?: string[]; poll?: Poll; link?: LinkPreview; md?: boolean; kb?: Row[]; card?: Card; live?: boolean; quiet?: boolean; only?: string; th?: string }
+/** Send a message. Resolves (with its id) once it's sent, or has failed: see its status. */
+export async function sendMessage(chat: string, text: string, opts: SendOpts = {}) {
   const ttl = state.chats[chat]?.timer || undefined
   const now = Date.now()
   const m: Msg = { id: msgId(), mine: true, text, ts: now, status: 'sending', reply: opts.reply, att: opts.att, fwd: opts.fwd, ttl, exp: ttl ? now + ttl * 1000 : undefined, men: opts.men?.length ? opts.men : undefined, poll: opts.poll, link: opts.link }
+  for (const k of ['md', 'kb', 'card', 'live', 'quiet', 'only', 'th'] as const) if (opts[k]) Object.assign(m, { [k]: opts[k] })
   setChat(chat, (c) => ({ ...c, request: undefined, messages: [...c.messages, m] }))
   saveChatsSoon()
   await push(chat, m)
+  return m.id
 }
+/** The bot fields of a message, as they go on the wire. */
+const botWire = (m: Msg) => ({ md: m.md ? 1 : undefined, kb: m.kb, card: m.card, live: m.live ? 1 : undefined, quiet: m.quiet ? 1 : undefined, th: m.th }) as const
 
 /** Attach files: each becomes its own message (caption goes on the first). */
-export async function sendFiles(chat: string, files: File[], opts: { caption?: string; reply?: string; asFile?: boolean } = {}) {
+export async function sendFiles(chat: string, files: File[], opts: { caption?: string; reply?: string; asFile?: boolean; th?: string } = {}) {
   for (const [i, f] of files.entries()) {
     if (f.size > MAX_FILE) {
       toast(`${f.name} is over 2 GB`)
@@ -1106,15 +1170,15 @@ export async function sendFiles(chat: string, files: File[], opts: { caption?: s
     try {
       const att = await prepare(f, opts.asFile)
       // Don't wait for the upload: every file shows up immediately with its own progress.
-      void sendMessage(chat, i === 0 ? opts.caption ?? '' : '', { att, reply: i === 0 ? opts.reply : undefined })
+      void sendMessage(chat, i === 0 ? opts.caption ?? '' : '', { att, reply: i === 0 ? opts.reply : undefined, th: opts.th })
     } catch {
       toast(`Couldn't send ${f.name}`)
     }
   }
 }
 
-export async function sendAtt(chat: string, att: Att, text = '', reply?: string) {
-  await sendMessage(chat, text, { att, reply })
+export async function sendAtt(chat: string, att: Att, text = '', reply?: string, th?: string) {
+  await sendMessage(chat, text, { att, reply, th })
 }
 
 async function push(chat: string, m: Msg) {
@@ -1132,10 +1196,10 @@ async function push(chat: string, m: Msg) {
       mirror({ t: 'sent', chat, p: { t: 'text', id: m.id, text: m.text, ts: m.ts, reply: m.reply, att: att && wire(att) } })
       return patchMsg(chat, m.id, { status: 'sent' })
     }
-    const p: Payload = { t: 'text', id: m.id, text: m.text, ts: m.ts, reply: m.reply, fwd: m.fwd, att: att && wire(att), ttl: m.ttl, men: m.men, poll: m.poll, link: m.link }
+    const p: Payload = { t: 'text', id: m.id, text: m.text, ts: m.ts, reply: m.reply, fwd: m.fwd, att: att && wire(att), ttl: m.ttl, men: m.men, poll: m.poll, link: m.link, ...botWire(m) }
     // Our other devices first, so they already have the message when the recipient's receipt arrives.
-    mirror({ t: 'sent', chat, p })
-    await deliverChat(chat, p)
+    mirror({ t: 'sent', chat, p: m.only ? { ...p, only: m.only } : p })
+    await (m.only ? deliverTo(chat, m.only, { ...p, only: 1 }) : deliverChat(chat, p))
     patchMsg(chat, m.id, { status: 'sent' })
   } catch {
     patchMsg(chat, m.id, { status: 'failed' })
@@ -1150,10 +1214,10 @@ function retryPending() {
     for (const m of c.messages) if (m.mine && (m.status === 'sending' || m.status === 'failed')) push(c.id, m)
 }
 
-let lastTyping = 0
+const lastTyping = new Map<string, number>()
 export function typing(chat: string) {
-  if (!state.settings.typing || Date.now() - lastTyping < 4000 || !state.chats[chat]?.messages.length) return
-  lastTyping = Date.now()
+  if (!state.settings.typing || Date.now() - (lastTyping.get(chat) ?? 0) < 4000 || !state.chats[chat]?.messages.length) return
+  lastTyping.set(chat, Date.now())
   deliverChat(chat, { t: 'typing' }).catch(() => {})
 }
 
@@ -1332,12 +1396,26 @@ async function handleInvite() {
 }
 window.addEventListener('hashchange', () => state.conn === 'online' && handleInvite())
 
-export function editMessage(chat: string, id: string, text: string) {
+export type EditOpts = { kb?: Row[] | null; card?: Card | null; live?: boolean }
+/** Edit one of our messages. Bots can also swap its buttons or card, and stream into it (`live`). */
+export function editMessage(chat: string, id: string, text: string, opts: EditOpts = {}) {
   const m = state.chats[chat]?.messages.find((x) => x.id === id)
-  if (!m?.mine || m.text === text) return
-  patchMsg(chat, id, { text, edited: true })
-  deliverChat(chat, { t: 'edit', id, text }).catch(() => toast("Edit wasn't sent. Check your connection."))
-  mirror({ t: 'sent', chat, p: { t: 'edit', id, text } })
+  if (!m?.mine || (m.text === text && opts.kb === undefined && opts.card === undefined && opts.live === undefined)) return Promise.resolve()
+  const p: Extract<Payload, { t: 'edit' }> = { t: 'edit', id, text, kb: opts.kb, card: opts.card, live: opts.live === undefined ? undefined : opts.live ? 1 : 0 }
+  patchMsg(chat, id, applyEdit(m, p))
+  mirror({ t: 'sent', chat, p })
+  const sent = m.only ? deliverTo(chat, m.only, p) : deliverChat(chat, p)
+  sent.catch(() => toast("Edit wasn't sent. Check your connection."))
+  return sent
+}
+/** What an edit changes. A message being streamed (or just finished) isn't marked "edited". */
+function applyEdit(x: Msg, p: Extract<Payload, { t: 'edit' }>): Partial<Msg> {
+  const patch: Partial<Msg> = { text: str(p.text, 65536) }
+  if (p.live !== undefined) patch.live = p.live === 1 || undefined
+  else if (!x.live && patch.text !== x.text) patch.edited = true // swapping only buttons or the card isn't an edit
+  if (p.kb !== undefined) patch.kb = p.kb === null ? undefined : readKb(p.kb)
+  if (p.card !== undefined) patch.card = p.card === null ? undefined : readCard(p.card)
+  return patch
 }
 
 /** Drop a local attachment copy unless another message (e.g. a forward) still uses it. */
@@ -1499,6 +1577,7 @@ export async function createGroup(name: string, members: string[], avatar?: stri
   openChat(id)
   await announce(id)
   shareWithGroup(id)
+  return id
 }
 
 /** Joining a group means choosing to be seen by its members, so they get our name and photo (like Signal). */
@@ -1633,6 +1712,207 @@ function readAtt(a: any): Att | undefined {
   }
 }
 
+// ---------- bots: what a peer may send, checked and capped like everything else ----------
+const COLOR = /^#[0-9a-fA-F]{6}$/
+const CMD = /^[a-z0-9_-]{1,32}$/
+const isUrl = (u: string) => /^https?:\/\/[^\s]+$/.test(u)
+const choice = (x: any, max = 100) => ({ l: str(x?.l, max).trim(), v: str(x?.v, max) })
+function readKb(v: unknown): Row[] | undefined {
+  if (!Array.isArray(v)) return
+  const rows: Row[] = []
+  for (const r of v.slice(0, 10)) {
+    if (Array.isArray(r)) {
+      const bs: Btn[] = []
+      for (const b of r.slice(0, 8)) {
+        const l = str(b?.l, 64).trim()
+        const d = str(b?.d, 256)
+        const u = str(b?.u, 2048)
+        if (!l || (!d && !isUrl(u))) continue
+        bs.push({ l, ...(d ? { d } : { u }), ...(['primary', 'danger', 'success'].includes(b.s) ? { s: b.s } : {}) })
+      }
+      if (bs.length) rows.push(bs)
+    } else if (r && typeof r === 'object' && typeof (r as Sel).sel === 'string') {
+      const s = r as Sel
+      const o = Array.isArray(s.o) ? s.o.slice(0, 25).map((x) => ({ ...choice(x), ...(x?.d ? { d: str(x.d, 100) } : {}), ...(x?.on ? { on: true } : {}) })).filter((x) => x.l && x.v) : []
+      if (!o.length || !s.sel) continue
+      const max = num(s.max ?? 1, 1, o.length)
+      rows.push({ sel: str(s.sel, 100), ph: str(s.ph, 150) || undefined, o, min: num(s.min ?? 1, 0, max), max })
+    }
+  }
+  return rows.length ? rows : undefined
+}
+function readCard(v: any): Card | undefined {
+  if (!v || typeof v !== 'object') return
+  const c: Card = { title: str(v.title, 256) || undefined, color: COLOR.test(v.color) ? v.color : undefined, footer: str(v.footer, 256) || undefined }
+  return c.title || c.color || c.footer ? c : undefined
+}
+function readBot(v: any): BotInfo | undefined {
+  if (!v || typeof v !== 'object') return
+  const cmds = Array.isArray(v.cmds)
+    ? v.cmds
+        .slice(0, 100)
+        .filter((c: any) => CMD.test(c?.n))
+        .map((c: any): BotCmd => {
+          const o = Array.isArray(c.o)
+            ? c.o
+                .slice(0, 25)
+                .filter((x: any) => CMD.test(x?.n))
+                .map((x: any) => ({ n: x.n, d: str(x.d, 100), ...(x.req ? { req: true } : {}), ...(x.auto ? { auto: true } : {}), ...(Array.isArray(x.ch) ? { ch: x.ch.slice(0, 25).map((y: any) => choice(y)).filter((y: any) => y.l && y.v) } : {}) }))
+            : []
+          return { n: c.n, d: str(c.d, 100), ...(o.length ? { o } : {}) }
+        })
+    : []
+  return { about: str(v.about, 512) || undefined, cmds: cmds.length ? cmds : undefined }
+}
+function readForm(v: any): Form | undefined {
+  if (!v || typeof v !== 'object' || !str(v.id, 100) || !Array.isArray(v.f)) return
+  const f = v.f
+    .slice(0, 5)
+    .map((x: any) => ({ id: str(x?.id, 100), l: str(x?.l, 45).trim(), ph: str(x?.ph, 100) || undefined, long: !!x?.long || undefined, secret: !!x?.secret || undefined, req: !!x?.req || undefined, min: x?.min ? num(x.min, 0, 4000) : undefined, max: x?.max ? num(x.max, 1, 4000) : undefined }))
+    .filter((x: any) => x.id && x.l)
+  return f.length ? { id: str(v.id, 100), title: str(v.title, 45) || 'Form', f } : undefined
+}
+/** The bot parts of a text payload, checked. */
+function readBotParts(p: any): Partial<Msg> {
+  const out: Partial<Msg> = {}
+  if (p.md) out.md = true
+  if (p.live) out.live = true
+  if (p.quiet) out.quiet = true
+  const kb = readKb(p.kb)
+  if (kb) out.kb = kb
+  const card = readCard(p.card)
+  if (card) out.card = card
+  return out
+}
+
+/** The bot daemon (bot/) listens here; the app doesn't. */
+export type Tap = { chat: string; from: string; msg: string; data: string; q: string; values?: string[]; fields?: Record<string, string> }
+export type BotHooks = {
+  message?(chat: string, m: Msg, from: string): void
+  edited?(chat: string, m: Msg, from: string): void
+  deleted?(chat: string, id: string, from: string): void
+  reaction?(chat: string, id: string, from: string, emoji: string | null): void
+  button?(e: Tap): void
+  autocomplete?(e: { chat: string; from: string; q: string; cmd: string; opt: string; val: string; args: string }): void
+  group?(chat: string): void
+  thread?(chat: string, t: Thread, from: string, created: boolean): void
+}
+let bot: BotHooks | null = null
+export const setBotHooks = (h: BotHooks) => void (bot = h)
+// ---------- threads ----------
+/** Thread ids are message-style: the starter's id prefix, then a uuid (so nobody can start one as someone else). */
+const THREAD_RE = /^[A-Za-z0-9_-]{16}\.[0-9a-f-]{36}$/
+/** The thread a message says it's in. One we haven't heard of yet (we joined later) gets a placeholder. */
+function threadOf(chat: string, th: unknown): string | undefined {
+  if (typeof th !== 'string' || !THREAD_RE.test(th)) return
+  // ponytail: people who join a group later only learn a thread's name if it's renamed; send thread state to new members if that matters.
+  if (!state.chats[chat]?.threads?.[th]) setChat(chat, (c) => ({ ...c, threads: { ...c.threads, [th]: { id: th, name: 'Thread', by: '', ts: Date.now(), v: 0 } } }))
+  return th
+}
+function onThread(chat: string, from: string, p: Extract<Payload, { t: 'thread' }>, ts: number) {
+  const c = state.chats[chat]
+  const id = str(p.id, 64)
+  if (!c || !THREAD_RE.test(id)) return
+  const cur = c.threads?.[id]
+  const fresh = !cur || !cur.v
+  // Started by whoever's id it carries; renamed by them or the group's owner.
+  if (fresh ? !id.startsWith(`${from.slice(0, 16)}.`) : from !== cur.by && from !== c.group?.owner) return
+  const v = num(p.v, 1, 1e15)
+  if (cur && v <= cur.v) return
+  const root = typeof p.root === 'string' && c.messages.some((x) => x.id === p.root) ? p.root : cur?.root
+  const t: Thread = { id, name: str(p.name, 100).trim() || 'Thread', root, by: fresh ? from : cur.by, ts: cur?.ts ?? ts, v }
+  setChat(chat, (c) => ({ ...c, threads: { ...c.threads, [id]: t }, messages: fresh && !root ? [...c.messages, sysMsg({ k: 'thread', by: from, name: t.name, th: id }, ts)] : c.messages }))
+  if (from !== state.me?.id) bot?.thread?.(chat, t, from, fresh)
+}
+/** Start a thread, from a message or on its own. Resolves with its id. */
+export async function createThread(chat: string, name: string, root?: string) {
+  const p = { t: 'thread' as const, id: msgId(), name: name.trim().slice(0, 100) || 'Thread', root, v: Date.now() }
+  onThread(chat, state.me!.id, p, p.v)
+  await saveChats()
+  mirror({ t: 'sent', chat, p })
+  await deliverChat(chat, p)
+  return p.id
+}
+export async function renameThread(chat: string, id: string, name: string) {
+  const t = state.chats[chat]?.threads?.[id]
+  if (!t) return
+  const p = { t: 'thread' as const, id, name: name.trim().slice(0, 100) || t.name, root: t.root, v: Math.max(Date.now(), t.v + 1) }
+  onThread(chat, state.me!.id, p, Date.now())
+  saveChatsSoon()
+  mirror({ t: 'sent', chat, p })
+  await deliverChat(chat, p)
+}
+export const openThread = (id: string | null) => set({ thread: id })
+
+/** Forms we asked someone to fill in, so only those can come back (key: who:form id). */
+const forms = new Map<string, { msg: string; until: number }>()
+
+/** A tap on one of our messages. Only on buttons we really sent, or forms we asked for: nobody can invent callback data. */
+function onTap(chat: string, from: string, p: Extract<Payload, { t: 'btn' }>) {
+  const m = state.chats[chat]?.messages.find((x) => x.id === p.id && x.mine)
+  const d = str(p.d, 256)
+  const q = str(p.q, 64)
+  if (!m || !d || !q || (m.only && m.only !== from)) return
+  const rows = m.kb ?? []
+  const sel = rows.find((r): r is Sel => !Array.isArray(r) && r.sel === d)
+  const form = forms.get(`${from}:${d}`)
+  const e: Tap = { chat, from, msg: m.id, data: d, q }
+  if (sel) {
+    const v = Array.isArray(p.v) ? [...new Set(p.v.map((x) => str(x, 100)))].filter((x) => sel.o.some((o) => o.v === x)) : []
+    if (v.length < (sel.min ?? 1) || v.length > (sel.max ?? 1)) return
+    e.values = v
+  } else if (form && form.msg === m.id && form.until > Date.now()) {
+    if (!p.f || typeof p.f !== 'object') return
+    e.fields = Object.fromEntries(Object.entries(p.f).slice(0, 5).map(([k, v]) => [str(k, 100), str(v, 4000)]))
+  } else if (!rows.some((r) => Array.isArray(r) && r.some((b) => b.d === d))) return
+  bot?.button?.(e)
+}
+
+/** Taps waiting for the bot's answer (key: bot:query id). Answers nobody asked for are ignored. */
+const tapWaits = new Map<string, { chat: string; msg: string; done: () => void }>()
+function onTapAnswer(chat: string, from: string, p: Extract<Payload, { t: 'btnack' }>) {
+  const w = tapWaits.get(`${from}:${p.q}`)
+  if (!w || w.chat !== chat) return
+  const form = readForm(p.form)
+  const text = str(p.text, 2000).trim()
+  if (form) set({ form: { chat, msg: w.msg, bot: from, form } })
+  else if (text && p.alert) set({ alert: { text, at: Date.now(), from } })
+  else if (text) toast(text)
+  w.done()
+}
+/** Tap a bot's button or choose from its dropdown (`v`), or send a filled-in form (`f`). Resolves when the bot answers (or after 15 s). */
+export function tap(chat: string, msg: string, botId: string, d: string, extra: { v?: string[]; f?: Record<string, string> } = {}) {
+  const q = crypto.randomUUID()
+  const key = `${botId}:${q}`
+  return new Promise<void>((res) => {
+    const done = () => (tapWaits.delete(key), res())
+    tapWaits.set(key, { chat, msg, done })
+    setTimeout(done, 15_000)
+    deliverTo(chat, botId, { t: 'btn', id: msg, d, q, ...extra }).catch(() => (toast("Couldn't reach the bot. Check your connection."), done()))
+  })
+}
+export const closeForm = () => set({ form: null })
+export const closeAlert = () => set({ alert: null })
+/** Suggestions from a bot for a command option, as you type it (nothing after 3 s: none). */
+const autoWaits = new Map<string, (o: { l: string; v: string }[]) => void>()
+export function suggest(chat: string, botId: string, cmd: string, opt: string, val: string, args = val) {
+  const q = crypto.randomUUID()
+  const key = `${botId}:${q}`
+  return new Promise<{ l: string; v: string }[]>((res) => {
+    const done = (o: { l: string; v: string }[] = []) => (autoWaits.delete(key), res(o))
+    autoWaits.set(key, done)
+    setTimeout(done, 3000)
+    deliverTo(chat, botId, { t: 'auto', q, cmd, opt, val, args }).catch(() => done())
+  })
+}
+/** Bots: answer a tap with a note, an alert, or a form to fill in (on message `msg`). */
+export function answerTap(chat: string, to: string, q: string, a: { text?: string; alert?: boolean; form?: Form; msg?: string }) {
+  if (a.form && a.msg) forms.set(`${to}:${a.form.id}`, { msg: a.msg, until: Date.now() + 15 * 60_000 })
+  return deliverTo(chat, to, { t: 'btnack', q, text: a.text, alert: a.alert ? 1 : undefined, form: a.form })
+}
+/** Bots: answer an autocomplete request. */
+export const answerSuggest = (chat: string, to: string, q: string, o: { l: string; v: string }[]) => deliverTo(chat, to, { t: 'autoans', q, o: o.slice(0, 25) })
+
 export const attLabel = (a: Att) => ({ photo: '📷 Photo', video: '🎬 Video', voice: '🎤 Voice message', audio: `🎵 ${a.name}`, file: `📎 ${a.name}`, sticker: '✨ Sticker', videonote: '📹 Video message' })[a.kind]
 
 let warnedFull = 0
@@ -1740,12 +2020,16 @@ async function handleSync(m: { id: number; ts: number }, dev: number, p: Payload
       if (att) msg.att = att
       if (q.poll && typeof q.poll === 'object' && Array.isArray(q.poll.o)) msg.poll = { q: str(q.poll.q, 300), o: q.poll.o.map((x) => str(x, 100)).slice(0, 10), multi: !!q.poll.multi }
       if (q.link && typeof q.link === 'object' && /^https?:\/\//.test(str(q.link.url, 2048))) msg.link = { url: str(q.link.url, 2048), title: str(q.link.title, 200) || undefined, desc: str(q.link.desc, 300) || undefined, site: str(q.link.site, 80) || undefined, img: imgUrl(q.link.img, 120_000) }
+      Object.assign(msg, readBotParts(q))
+      if (typeof q.only === 'string' && ID_RE.test(q.only)) msg.only = q.only
+      const th = threadOf(chat, q.th)
+      if (th) msg.th = th
       setChat(chat, (c) => ({ ...c, request: undefined, archived: undefined, messages: [...c.messages, msg] }))
       if (att && att.size < 15_000_000) download(att)
     } else if (q.t === 'react') {
       setChat(chat, (c) => ({ ...c, messages: c.messages.map((x) => (x.id === q.id ? { ...x, re: withReaction(x.re, 'me', q.emoji ? str(q.emoji, 16) : null) } : x)) }))
     } else if (q.t === 'edit') {
-      setChat(chat, (c) => ({ ...c, messages: c.messages.map((x) => (x.id === q.id && x.mine ? { ...x, text: str(q.text, 65536), edited: true } : x)) }))
+      setChat(chat, (c) => ({ ...c, messages: c.messages.map((x) => (x.id === q.id && x.mine ? { ...x, ...applyEdit(x, q) } : x)) }))
     } else if (q.t === 'delete') {
       const gone = state.chats[chat]?.messages.find((x) => x.id === q.id && x.mine)
       setChat(chat, (c) => ({ ...c, messages: c.messages.filter((x) => !(x.mine && x.id === q.id)) }))
@@ -1763,6 +2047,8 @@ async function handleSync(m: { id: number; ts: number }, dev: number, p: Payload
           pins: q.on ? [...(c.pins ?? []).filter((x) => x !== q.id), q.id] : (c.pins ?? []).filter((x) => x !== q.id),
           messages: q.on ? [...c.messages, sysMsg({ k: 'pin', by: me, name: target.text.slice(0, 60) || attLabel(target.att!) }, m.ts)] : c.messages,
         }))
+    } else if (q.t === 'thread') {
+      onThread(chat, me, q, m.ts)
     } else if (q.t === 'group' && GID_RE.test(chat)) {
       await onGroup(me, { ...q, g: chat }, m.ts)
     } else if (q.t === 'leave' && state.chats[chat]?.group) {
@@ -1774,7 +2060,7 @@ async function handleSync(m: { id: number; ts: number }, dev: number, p: Payload
     setChat(p.chat, (c) => ({ ...c, unread: 0, mentions: 0, markedUnread: false, messages: c.messages.map((x) => (x.mine || x.seen || x.ts > at ? x : { ...x, seen: true, exp: x.ttl ? now + x.ttl * 1000 : undefined })) }))
   } else if (p.t === 'acct') {
     if (p.profile && typeof p.profile === 'object' && Number(p.profile.v) > state.profile.v)
-      set({ profile: { name: str(p.profile.name, 64), avatar: imgUrl(p.profile.avatar, 120_000), v: Number(p.profile.v) } })
+      set({ profile: { name: str(p.profile.name, 64), avatar: imgUrl(p.profile.avatar, 120_000), v: Number(p.profile.v), bot: readBot(p.profile.bot) } })
     if (Array.isArray(p.blocked)) set({ blocked: p.blocked.filter((x) => typeof x === 'string' && ID_RE.test(x)) })
     if (typeof p.ak === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(p.ak)) myAk = p.ak
     await saveMeta()
@@ -1810,11 +2096,13 @@ async function handlePayload(m: { id: number; ts: number }, from: string, dev: n
     if (p.t === 'group') {
       await onGroup(from, p, m.ts)
       await saveChats()
+      bot?.group?.(p.g)
       return
     }
     if (p.t === 'leave') {
       onLeave(from, p.g, m.ts)
       await saveChats()
+      bot?.group?.(p.g)
       return
     }
     const g = state.chats[p.g]?.group
@@ -1864,6 +2152,11 @@ async function handlePayload(m: { id: number; ts: number }, from: string, dev: n
           img: imgUrl(p.link.img, 120_000),
         }
       }
+      Object.assign(msg, readBotParts(p))
+      const th = threadOf(chat, p.th)
+      if (th) msg.th = th
+      // "Only you can see this": in a group, a message sent to us alone.
+      if (p.only && inGroup) msg.only = state.me!.id
       if (msg.text || msg.att || msg.poll) {
         const c0 = state.chats[chat]
         const muted = !!c0 && isMuted(c0)
@@ -1881,11 +2174,12 @@ async function handlePayload(m: { id: number; ts: number }, from: string, dev: n
         if (!req) receipt = { t: 'receipt', ids: [id], s: viewing && state.settings.readReceipts ? 'read' : 'delivered' }
         // Photos and voice notes download right away, like other messengers. Big files wait for a tap.
         if (att && (att.kind === 'photo' || att.kind === 'voice' || (att.kind !== 'file' && att.size < 15_000_000))) download(att)
-        if (!viewing && !req && (!muted || msg.mentionsMe)) {
+        if (!viewing && !req && !msg.quiet && (!muted || msg.mentionsMe)) {
           if (state.settings.sounds) chime()
           const body = msg.poll ? `📊 ${msg.poll.q}` : msg.text || attLabel(att!)
           notify(chat, inGroup ? `${personName(from)}: ${body}` : body)
         }
+        bot?.message?.(chat, msg, from)
       }
     }
   } else if (p.t === 'receipt' && known && Array.isArray(p.ids)) {
@@ -1905,13 +2199,26 @@ async function handlePayload(m: { id: number; ts: number }, from: string, dev: n
   } else if (p.t === 'react' && known) {
     const emoji = p.emoji ? str(p.emoji, 16) : null
     setChat(chat, (c) => ({ ...c, messages: c.messages.map((x) => (x.id === p.id ? { ...x, re: withReaction(x.re, from, emoji) } : x)) }))
+    if (typeof p.id === 'string') bot?.reaction?.(chat, p.id, from, emoji)
   } else if (p.t === 'edit' && own(p.id)) {
-    const text = str(p.text, 65536)
-    setChat(chat, (c) => ({ ...c, messages: c.messages.map((x) => (x.id === p.id && !x.mine ? { ...x, text, edited: true } : x)) }))
+    setChat(chat, (c) => ({ ...c, messages: c.messages.map((x) => (x.id === p.id && !x.mine ? { ...x, ...applyEdit(x, p) } : x)) }))
+    bot?.edited?.(chat, own(p.id)!, from)
   } else if (p.t === 'delete' && own(p.id)) {
     const gone = own(p.id)
     setChat(chat, (c) => ({ ...c, messages: c.messages.filter((x) => x.mine || x.id !== p.id) }))
     releaseAtt(gone?.att)
+    bot?.deleted?.(chat, p.id, from)
+  } else if (p.t === 'thread' && known) {
+    onThread(chat, from, p, m.ts)
+  } else if (p.t === 'btn' && known && !state.chats[chat].request) {
+    onTap(chat, from, p)
+  } else if (p.t === 'btnack' && typeof p.q === 'string') {
+    onTapAnswer(chat, from, p)
+  } else if (p.t === 'auto' && known && !state.chats[chat].request && typeof p.q === 'string') {
+    bot?.autocomplete?.({ chat, from, q: str(p.q, 64), cmd: str(p.cmd, 32), opt: str(p.opt, 32), val: str(p.val, 100), args: str(p.args, 1000) })
+  } else if (p.t === 'autoans' && typeof p.q === 'string') {
+    const o = Array.isArray(p.o) ? p.o.slice(0, 25).map((x) => ({ l: str(x?.l, 100), v: str(x?.v, 100) })).filter((x) => x.l && x.v) : []
+    autoWaits.get(`${from}:${p.q}`)?.(o)
   } else if (p.t === 'vote' && known && Array.isArray(p.c)) {
     const target = state.chats[chat].messages.find((x) => x.id === p.id && x.poll)
     if (target?.poll) {
@@ -1941,7 +2248,7 @@ async function handlePayload(m: { id: number; ts: number }, from: string, dev: n
     // Not awaited: we're inside the receive queue.
     if (isTrusted(from)) setPerson(from, { sent: undefined }), void shareProfile(from).catch(() => {})
   } else if (p.t === 'profile') {
-    setPerson(from, { name: str(p.name, 64).trim() || undefined, avatar: imgUrl(p.avatar, 120_000), ak: typeof p.ak === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(p.ak) ? p.ak : undefined })
+    setPerson(from, { name: str(p.name, 64).trim() || undefined, avatar: imgUrl(p.avatar, 120_000), ak: typeof p.ak === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(p.ak) ? p.ak : undefined, bot: readBot(p.bot) })
   }
   if (p.t !== 'typing' && p.t !== 'call') await saveChats()
   if (receipt) deliver(from, inGroup ? { ...receipt, g: chat } : receipt).catch(() => {})
@@ -1979,7 +2286,7 @@ function notify(chat: string, text: string) {
 
 /** Open a chat and send read receipts for anything unseen. */
 export function openChat(id: string | null) {
-  set({ active: id })
+  set({ active: id, thread: null })
   if (id) markRead(id)
 }
 
