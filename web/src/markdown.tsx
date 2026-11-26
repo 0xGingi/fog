@@ -69,7 +69,12 @@ function Spoiler({ children }: { children: ReactNode }) {
   )
 }
 
-export function inline(s: string, key: string): ReactNode[] {
+/** How deep formatting and blocks may nest. A message of thousands of `>` or `*_*_` would otherwise
+ *  recurse until the renderer runs out of stack; past this, the rest shows as plain text. */
+const MAX_DEPTH = 8
+
+export function inline(s: string, key: string, depth = 0): ReactNode[] {
+  if (depth > MAX_DEPTH) return [s]
   const out: ReactNode[] = []
   let last = 0
   let i = 0
@@ -77,16 +82,16 @@ export function inline(s: string, key: string): ReactNode[] {
     if (m.index > last) out.push(s.slice(last, m.index))
     const k = `${key}.${i++}`
     if (m[1]) out.push(<code key={k} className="rounded-md bg-black/[0.07] px-1 py-px font-mono text-[0.88em] dark:bg-white/10">{m[2].trim() ? m[2].replace(/^ (.*) $/, '$1') : m[2]}</code>)
-    else if (m[3] ?? m[4]) out.push(<strong key={k} className="font-semibold">{inline(m[3] ?? m[4], k)}</strong>)
-    else if (m[5] ?? m[6]) out.push(<em key={k}>{inline(m[5] ?? m[6], k)}</em>)
-    else if (m[7]) out.push(<s key={k}>{inline(m[7], k)}</s>)
-    else if (m[8]) out.push(<Spoiler key={k}>{inline(m[8], k)}</Spoiler>)
+    else if (m[3] ?? m[4]) out.push(<strong key={k} className="font-semibold">{inline(m[3] ?? m[4], k, depth + 1)}</strong>)
+    else if (m[5] ?? m[6]) out.push(<em key={k}>{inline(m[5] ?? m[6], k, depth + 1)}</em>)
+    else if (m[7]) out.push(<s key={k}>{inline(m[7], k, depth + 1)}</s>)
+    else if (m[8]) out.push(<Spoiler key={k}>{inline(m[8], k, depth + 1)}</Spoiler>)
     else if (m[9]) {
       const href = safeUrl(m[10])
       out.push(
         href ? (
           <Link key={k} href={href} plain={m[9] === m[10]}>
-            {inline(m[9], k)}
+            {inline(m[9], k, depth + 1)}
           </Link>
         ) : (
           m[0]
@@ -131,7 +136,8 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
   )
 }
 
-function blocks(src: string[], key: string): ReactNode[] {
+function blocks(src: string[], key: string, depth = 0): ReactNode[] {
+  if (depth > MAX_DEPTH) return [<p key={`${key}.deep`}>{lines(src, `${key}.deep`)}</p>]
   const out: ReactNode[] = []
   let i = 0
   const k = () => `${key}.${out.length}`
@@ -205,7 +211,7 @@ function blocks(src: string[], key: string): ReactNode[] {
       while (i < src.length && QUOTE.test(src[i])) body.push(src[i++].replace(QUOTE, ''))
       out.push(
         <blockquote key={k()} className="border-l-[3px] border-current/30 pl-2.5 opacity-90">
-          {blocks(body, k())}
+          {blocks(body, k(), depth + 1)}
         </blockquote>,
       )
       continue
@@ -241,7 +247,7 @@ function blocks(src: string[], key: string): ReactNode[] {
               <li key={j} className={task ? 'list-none -ml-5' : undefined}>
                 {task && <input type="checkbox" checked={task[1] !== ' '} readOnly className="mr-1.5 align-middle accent-current" />}
                 {lines([first, ...para], `${k()}i${j}`)}
-                {nested.length > 0 && blocks(nested, `${k()}n${j}`)}
+                {nested.length > 0 && blocks(nested, `${k()}n${j}`, depth + 1)}
               </li>
             )
           })}

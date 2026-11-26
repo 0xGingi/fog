@@ -2,13 +2,13 @@
 // fog-bot: run a Fog account as a bot. It holds the account's keys, does the end-to-end encryption
 // with the app's own engine (web/src/fog.ts), and gives your bot a plain HTTP API on this machine.
 // The Fog server sees an ordinary account; it never learns that it's a bot or what it says.
-import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
+import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, watch, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 // The crypto core, embedded in the binary by `bun build --compile`.
 import wasmPath from '../web/src/core/fog_core_bg.wasm' with { type: 'file' }
 
-const VERSION = '0.4.0'
+const VERSION = '0.4.1'
 const USAGE = `fog-bot ${VERSION}: run a Fog account as a bot, with a local HTTP API.
 
   fog-bot init [--server URL] [--username NAME] [--name "Display name"] [--owner @you] [--restore]
@@ -19,6 +19,7 @@ const USAGE = `fog-bot ${VERSION}: run a Fog account as a bot, with a local HTTP
   fog-bot allow [--add @x,ID] [--remove @x,ID] [--set @x,ID] [--clear]
       Who the bot talks to. Anyone else can't reach it: their messages stay unanswered
       requests and never show up in the API. With an empty list, anyone can.
+      Works while \`fog-bot run\` is running: it picks up the change within a second.
   fog-bot token [--rotate]
       Print the API token (or replace it).
   fog-bot info
@@ -40,17 +41,24 @@ const flag = (k: string) => (typeof flags[k] === 'string' ? (flags[k] as string)
 const dir = flag('dir') ?? process.env.FOG_BOT_DIR ?? join(homedir(), '.fog-bot')
 /** `allow`: account ids the bot talks to (empty: anyone). Usernames are looked up once, when added. */
 type Config = { server: string; port: number; host: string; accept: 'all' | 'none'; allow: string[] }
+/** A change to the allowlist, from `fog-bot allow` to the running bot. */
+type AllowChange = { id: string; clear?: boolean; set?: string[]; add?: string[]; remove?: string[] }
 const configPath = join(dir, 'config.json')
 const config: Config = { server: 'https://getfog.org', port: 8790, host: '127.0.0.1', accept: 'all', allow: [], ...(existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {}) }
 if (flag('server')) config.server = flag('server')!.replace(/\/+$/, '')
 if (flag('port')) config.port = Number(flag('port'))
 if (flag('host')) config.host = flag('host')!
 if (flag('accept') === 'all' || flag('accept') === 'none') config.accept = flag('accept') as Config['accept']
-const saveConfig = () => writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 })
+/** Write a file whole (temp file, then rename), so a reader never sees half of it. */
+const writeAtomic = (path: string, text: string) => {
+  writeFileSync(`${path}.tmp`, text, { mode: 0o600 })
+  renameSync(`${path}.tmp`, path)
+}
+const saveConfig = () => writeAtomic(configPath, JSON.stringify(config, null, 2) + '\n')
 const tokenPath = join(dir, 'token')
 const newToken = () => {
   const t = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url')
-  writeFileSync(tokenPath, t + '\n', { mode: 0o600 })
+  writeAtomic(tokenPath, t + '\n')
   return t
 }
 const token = () => (existsSync(tokenPath) ? readFileSync(tokenPath, 'utf8').trim() : newToken())
@@ -62,7 +70,45 @@ if (cmd === 'help' || cmd === '--help' || cmd === '-h' || !['init', 'run', 'toke
 mkdirSync(dir, { recursive: true, mode: 0o700 })
 chmodSync(dir, 0o700)
 if (cmd === 'token') {
+  // A running fog-bot watches this file: the old token stops working as soon as it's replaced.
   console.log(flags.rotate ? newToken() : token())
+  process.exit(0)
+}
+
+// `allow` while the bot is running: edit the list in config.json, and the running bot (which watches it)
+// looks up any @usernames and saves their account ids. Until then a username matches nobody.
+const runningPid = (() => {
+  if (!existsSync(join(dir, 'fog.db'))) return null
+  try {
+    const { Database } = require('bun:sqlite') as typeof import('bun:sqlite')
+    const db = new Database(join(dir, 'fog.db'), { readonly: true })
+    const pid = db.query<{ pid: number }, []>('SELECT pid FROM lock').get()?.pid ?? null
+    db.close()
+    return pid && pid !== process.pid && isAlive(pid) ? pid : null
+  } catch {
+    return null
+  }
+})()
+// The running bot does the change (it can look up @usernames) and answers in allow-result.json. All or
+// nothing: if any name doesn't resolve, the list stays as it was.
+if (cmd === 'allow' && runningPid) {
+  const list = (k: string) => (flag(k) ?? '').split(/[\s,]+/).filter(Boolean)
+  const req: AllowChange = { id: crypto.randomUUID(), clear: !!flags.clear, set: flag('set') !== undefined ? list('set') : undefined, add: list('add'), remove: list('remove') }
+  if (req.clear || req.set || req.add?.length || req.remove?.length) {
+    writeAtomic(join(dir, 'allow-request.json'), JSON.stringify(req))
+    let res: { id: string; ok: boolean; error?: string; allow?: string[] } | null = null
+    for (let i = 0; i < 150 && res?.id !== req.id; i++) {
+      await Bun.sleep(100)
+      try {
+        res = JSON.parse(readFileSync(join(dir, 'allow-result.json'), 'utf8'))
+      } catch {}
+    }
+    if (res?.id !== req.id) fail(`The running bot (pid ${runningPid}) didn't answer. Nothing changed; is it connected?`)
+    if (!res.ok) fail(`Nothing changed: ${res.error}`)
+    config.allow = res.allow ?? []
+    console.log('Saved; the running bot uses it now.')
+  }
+  console.log(config.allow.length ? `The bot talks only to:\n${config.allow.map((e) => `  ${e}`).join('\n')}` : 'Anyone can message the bot (no allowlist).')
   process.exit(0)
 }
 
@@ -98,16 +144,18 @@ await fog.boot()
 
 // ---------- who the bot talks to ----------
 const ID = /^[A-Za-z0-9_-]{43}$/
+const EMPTY = 'Nothing changed: that would leave the allowlist empty, which lets anyone message the bot. Use --clear if you mean that.'
 /** Account ids for a list of @usernames / ids / invite links. Looked up now, so later the server can't swap who a name means. */
-async function lookup(list: string) {
+async function lookup(list: string, die: (msg: string) => never = fail) {
   await fog.waitOnline()
   const ids: string[] = []
   for (const raw of list.split(/[\s,]+/).filter(Boolean)) {
-    const p = await fog.findPeer(raw).catch(() => fail(`No Fog account ${raw}.`))
-    if (p.id === fog.getState().me?.id) fail(`${raw} is the bot itself.`)
+    const p = await fog.findPeer(raw).catch(() => die(`No Fog account ${raw}.`))
+    if (p.id === fog.getState().me?.id) die(`${raw} is the bot itself.`)
     console.log(`  ${raw} → ${p.id}${p.username ? ` (@${p.username})` : ''}`)
     ids.push(p.id)
   }
+  if (!ids.length) die('No accounts given.')
   return ids
 }
 const showAllow = () =>
@@ -131,6 +179,7 @@ if (cmd === 'info' || cmd === 'allow') {
       const gone = await lookup(flag('remove')!)
       config.allow = config.allow.filter((id) => !gone.includes(id))
     }
+    if (!config.allow.length && !flags.clear) fail(EMPTY)
     if (flags.clear || flag('set') || flag('add') || flag('remove')) (saveConfig(), console.log('Saved. Restart fog-bot run if it\'s running.'))
   }
   showAllow()
@@ -160,10 +209,16 @@ async function init() {
     if (ok !== 'available') console.error(`Username @${username} is ${ok}; the bot has none for now.`)
     else await fog.claimUsername(username)
   } else fog.skipUsername()
-  if (flag('owner')) {
-    config.allow = await lookup(flag('owner')!)
-    saveConfig()
-  }
+  // A bad --owner mustn't stop init before the recovery phrase is shown: warn, and leave the list empty.
+  if (flag('owner'))
+    try {
+      config.allow = await lookup(flag('owner')!, (msg) => {
+        throw new Error(msg)
+      })
+      saveConfig()
+    } catch (e) {
+      console.error(`\n${(e as Error).message} The bot has no allowlist yet: set one with fog-bot allow --add @you`)
+    }
   await Bun.sleep(500) // let the profile and username settle
   console.log(`
 Done. The bot's account id is ${fog.getState().me!.id}${fog.getState().me?.username ? ` (@${fog.getState().me?.username})` : ''}.
@@ -282,6 +337,81 @@ if (flag('allow')) {
   saveConfig()
 }
 const me0 = fog.getState().me!.id
+// Changes while running, without a restart: `fog-bot allow` (allow-request.json), an edit to config.json,
+// and `fog-bot token --rotate` (the old token stops working right away).
+const debounce = new Map<string, ReturnType<typeof setTimeout>>()
+watch(dir, (_, file) => {
+  if (file !== 'allow-request.json' && file !== 'config.json' && file !== 'token') return
+  clearTimeout(debounce.get(file))
+  debounce.set(
+    file,
+    setTimeout(() => {
+      const run = file === 'token' ? reloadToken : file === 'config.json' ? reloadConfig : applyAllowChange
+      void Promise.resolve(run()).catch((e) => console.error(`${file}:`, (e as Error).message))
+    }, 200),
+  )
+})
+function reloadToken() {
+  const t = existsSync(tokenPath) ? readFileSync(tokenPath, 'utf8').trim() : ''
+  if (t.length >= 32 && t !== TOKEN) (TOKEN = t), console.log('API token replaced; the old one no longer works.')
+}
+/** Account ids for these entries (@usernames looked up now). Throws, naming them, if any don't resolve. */
+async function resolveAll(entries: string[]) {
+  const ids: string[] = []
+  const bad: string[] = []
+  for (const e of entries) {
+    if (ID.test(e)) {
+      ids.push(e)
+      continue
+    }
+    const p = await fog.findPeer(e).catch(() => null)
+    if (p && p.id !== me0) ids.push(p.id)
+    else bad.push(e)
+  }
+  if (bad.length) throw new Error(`no Fog account ${bad.join(', ')}`)
+  return ids
+}
+function useAllow(next: string[]) {
+  if (JSON.stringify(next) === JSON.stringify(config.allow)) return
+  config.allow = next
+  console.log(next.length ? `allowlist: now ${next.length} ${next.length === 1 ? 'person' : 'people'}` : 'allowlist: cleared; anyone can message the bot')
+  // People just added may be waiting as requests; people just removed go back to being requests.
+  for (const c of Object.values(fog.getState().chats)) accept(c.id)
+}
+async function applyAllowChange() {
+  const path = join(dir, 'allow-request.json')
+  if (!existsSync(path)) return
+  const req: AllowChange = JSON.parse(readFileSync(path, 'utf8'))
+  rmSync(path, { force: true })
+  const answer = (r: object) => writeAtomic(join(dir, 'allow-result.json'), JSON.stringify({ id: req.id, ...r }))
+  try {
+    let next = req.clear ? [] : req.set ? await resolveAll(req.set) : [...config.allow]
+    next = [...new Set([...next, ...(await resolveAll(req.add ?? []))])]
+    const gone = await resolveAll(req.remove ?? [])
+    next = next.filter((id) => !gone.includes(id))
+    if (!next.length && !req.clear) throw new Error(EMPTY.replace('Nothing changed: ', ''))
+    const disk = JSON.parse(readFileSync(configPath, 'utf8'))
+    writeAtomic(configPath, JSON.stringify({ ...disk, allow: next }, null, 2) + '\n')
+    useAllow(next)
+    answer({ ok: true, allow: next })
+  } catch (e) {
+    console.warn(`allowlist change refused, list unchanged: ${(e as Error).message}`)
+    answer({ ok: false, error: (e as Error).message })
+  }
+}
+/** config.json edited by hand: use its list if every entry resolves; otherwise keep the current one. */
+async function reloadConfig() {
+  const disk = JSON.parse(readFileSync(configPath, 'utf8'))
+  const entries: string[] = Array.isArray(disk.allow) ? disk.allow : []
+  try {
+    const next = [...new Set(await resolveAll(entries))]
+    // Usernames are saved as the account ids they pointed to just now.
+    if (entries.some((e) => !ID.test(e))) writeAtomic(configPath, JSON.stringify({ ...disk, allow: next }, null, 2) + '\n')
+    useAllow(next)
+  } catch (e) {
+    console.warn(`config.json allowlist not used, keeping the current one: ${(e as Error).message}`)
+  }
+}
 /** Someone the bot talks to (everyone, without an allowlist). */
 const allowed = (id: string) => !config.allow.length || id === me0 || config.allow.includes(id)
 /** A chat the bot is in for someone allowed: a DM with them, or a group one of them owns (they're who adds members). */
@@ -289,8 +419,13 @@ const chatAllowed = (chat: string) => {
   const c = fog.getState().chats[chat]
   return !config.allow.length || (!!c && !fog.isLocalChat(chat) && (c.group ? allowed(c.group.owner) : allowed(chat)))
 }
-// Anyone else's request stays a request: no receipts, no profile, nothing reaches the API.
-const accept = (chat: string) => config.accept === 'all' && chatAllowed(chat) && fog.getState().chats[chat]?.request && fog.acceptRequest(chat)
+// Anyone else's request stays a request: no receipts, no profile, nothing reaches the API. And someone
+// taken off the list goes back to being one, so they stop getting receipts that show the bot is online.
+const accept = (chat: string) => {
+  if (fog.isLocalChat(chat)) return
+  if (!chatAllowed(chat)) return fog.unaccept(chat)
+  if (config.accept === 'all' && fog.getState().chats[chat]?.request) fog.acceptRequest(chat)
+}
 /** Only events from allowed people, in chats the bot accepted for them. */
 const shown = (chat: string, from: string) => allowed(from) && chatAllowed(chat) && !fog.getState().chats[chat]?.request
 fog.setBotHooks({
@@ -335,7 +470,7 @@ fog.setBotHooks({
 for (const c of Object.values(fog.getState().chats)) accept(c.id)
 
 // ---------- run: the API ----------
-const TOKEN = token()
+let TOKEN = token()
 class HttpError extends Error {
   constructor(
     public status: number,
@@ -587,7 +722,9 @@ const routes: Route[] = [
     /^\/v1\/chats\/([^/]+)\/threads$/,
     async (_r, _u, [c]) => {
       const chat = await resolveChat(c)
-      return json({ threads: Object.keys(fog.getState().chats[chat].threads ?? {}).map((t) => thread(chat, t)) })
+      // Only threads started by people on the allowlist (or the bot); one we were caught up on, by whoever its id belongs to.
+      const starterOk = (t: { id: string; by: string }) => (t.by ? allowed(t.by) : [me0, ...config.allow].some((a) => t.id.startsWith(`${a.slice(0, 16)}.`)) || !config.allow.length)
+      return json({ threads: Object.values(fog.getState().chats[chat].threads ?? {}).filter(starterOk).map((t) => thread(chat, t.id)) })
     },
   ],
   [

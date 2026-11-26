@@ -35,13 +35,14 @@ With an allowlist, the bot only exists for the people on it. Everyone else:
 
 ```sh
 fog-bot init … --owner @you        # set it when creating the bot
-fog-bot allow --add @partner       # add, --remove, --set, --clear (stop `fog-bot run` first)
+fog-bot allow --add @partner       # add, --remove, --set, --clear (works while it's running)
 fog-bot allow                      # show the list
 fog-bot run --allow @you,@partner  # or set it when starting
 ```
 
-Usernames are looked up once, when you add them, and saved as account ids, so the server can't later
-change who a name points to. With no allowlist, anyone can message the bot (it says so when it starts).
+Taking someone off the list (it takes effect within a second, even while `fog-bot run` is running) puts
+their chat back to an unanswered request, so they stop getting receipts too. Usernames are looked up once,
+when you add them, and saved as account ids, so the server can't later change who a name points to. With no allowlist, anyone can message the bot (it says so when it starts).
 
 Build a single binary with `bun build --compile bot/main.ts --outfile fog-bot` from the repo root, after
 `bun install && bun run core` in `web/` (which builds the crypto core; see Local Development in the main

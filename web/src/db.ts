@@ -29,6 +29,12 @@ type LockRecord = { salt: Uint8Array<ArrayBuffer>; iter: number; kdf?: 'argon2id
 /** `a: 1`: the record's key name is bound in as AES-GCM additional data, so records can't be swapped. */
 type Sealed = { __fog: 1; iv: Uint8Array<ArrayBuffer>; ct: ArrayBuffer; k: 'json' | 'bytes' | 'blob'; type?: string; a?: 1 }
 const LOCK = 'lock'
+/**
+ * Turning the lock on or off converts every record, one at a time. This record (sealed, so it can't be
+ * planted) says a conversion is under way ('on' / 'off'); if the app closes midway, unlocking finishes it.
+ */
+const MIG = 'lock-mig'
+let migrating: 'on' | 'off' | null = null
 
 let dek: CryptoKey | null = null
 let dekRaw: Uint8Array<ArrayBuffer> | null = null
@@ -80,15 +86,18 @@ export async function kv<T>(key: string, value?: T | null): Promise<T | undefine
     const v = await raw<unknown>(key)
     if (isSealed(v)) return (await unseal(key, v)) as T
     // With the lock on, everything we wrote is sealed: a plaintext record was planted, so ignore it.
-    return v !== undefined && key !== LOCK && (await lockIsOn()) ? undefined : (v as T | undefined)
+    // (Except while records are being converted: then some are legitimately still plaintext.)
+    return v !== undefined && key !== LOCK && !migrating && (await lockIsOn()) ? undefined : (v as T | undefined)
   }
   // Seal before opening the transaction: IndexedDB transactions don't survive awaiting other work.
-  return raw(key, value !== null && dek && key !== LOCK ? await seal(key, value) : value)
+  // While the lock is being turned off, new writes go in plaintext (the key is about to be dropped).
+  return raw(key, value !== null && dek && key !== LOCK && migrating !== 'off' ? await seal(key, value) : value)
 }
 
 export async function kvClear() {
   lockOn = Promise.resolve(false)
   dek = dekRaw = null
+  migrating = null
   if (store) return store.clear()
   const db = await idb()
   await new Promise((res) => {
@@ -99,11 +108,11 @@ export async function kvClear() {
 }
 
 async function allKeys(): Promise<string[]> {
-  if (store) return (await store.keys()).filter((k) => k !== LOCK)
+  if (store) return (await store.keys()).filter((k) => k !== LOCK && k !== MIG)
   const db = await idb()
   return new Promise((res) => {
     const r = db.transaction('kv').objectStore('kv').getAllKeys()
-    r.onsuccess = () => res((r.result as string[]).filter((k) => k !== LOCK))
+    r.onsuccess = () => res((r.result as string[]).filter((k) => k !== LOCK && k !== MIG))
   })
 }
 
@@ -132,6 +141,33 @@ async function useDek(bytes: Uint8Array<ArrayBuffer>) {
     const v = await raw<unknown>(k)
     if (isSealed(v) && !v.a) await raw(k, await seal(k, await unseal(k, v)))
   }
+  // Turning the lock on or off was interrupted (app closed, storage error): finish it now.
+  const m = await raw<unknown>(MIG)
+  migrating = isSealed(m) ? ((await unseal(MIG, m)) as 'on' | 'off') : null
+  if (migrating === 'on') await finishOn()
+  else if (migrating === 'off') await finishOff()
+}
+/** Seal every record still in plaintext, then mark the conversion done. */
+async function finishOn() {
+  // Re-read each value right before sealing it, so writes that land mid-migration aren't lost.
+  for (const k of await allKeys()) {
+    const v = await raw<unknown>(k)
+    if (v !== undefined && !isSealed(v)) await raw(k, await seal(k, v))
+  }
+  await raw(MIG, null)
+  migrating = null
+}
+/** Decrypt every sealed record, then remove the lock (and the key) for good. */
+async function finishOff() {
+  for (const k of await allKeys()) {
+    const v = await raw<unknown>(k)
+    if (isSealed(v)) await raw(k, await unseal(k, v))
+  }
+  await raw(LOCK, null)
+  await raw(MIG, null)
+  lockOn = Promise.resolve(false)
+  dek = dekRaw = null
+  migrating = null
 }
 
 export async function unlockWithPasscode(code: string) {
@@ -145,19 +181,22 @@ export async function unlockWithPasscode(code: string) {
   }
 }
 
-/** Turn the lock on: new data key, wrapped by the passcode, then every stored value re-sealed. */
+/**
+ * Turn the lock on: new data key, wrapped by the passcode, then every stored value re-sealed.
+ * The wrapped key is saved before any record is sealed, and the conversion is marked as under way,
+ * so closing the app midway never leaves a record sealed under a key that wasn't kept.
+ */
 export async function enableLock(code: string) {
   const salt = rand(16)
   const bytes = rand(32)
   const rec: LockRecord = { salt, iter: 0, kdf: 'argon2id', pass: await wrap(await passKey(code, salt, 0, 'argon2id'), bytes) }
-  await useDek(bytes)
-  // Re-read each value right before sealing it, so writes that land mid-migration aren't lost.
-  for (const k of await allKeys()) {
-    const v = await raw<unknown>(k)
-    if (!isSealed(v)) await kv(k, v)
-  }
+  dekRaw = bytes
+  dek = await subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt'])
+  await raw(MIG, await seal(MIG, 'on'))
+  migrating = 'on'
   await raw(LOCK, rec)
   lockOn = Promise.resolve(true)
+  await finishOn()
 }
 
 export async function changePasscode(code: string) {
@@ -168,16 +207,12 @@ export async function changePasscode(code: string) {
   await raw(LOCK, { ...l, salt, iter: 0, kdf: 'argon2id', pass: await wrap(await passKey(code, salt, 0, 'argon2id'), dekRaw) })
 }
 
-/** Turn the lock off: decrypt everything back in place. Requires being unlocked. */
+/** Turn the lock off: decrypt everything back in place (resumed on the next unlock if interrupted). Requires being unlocked. */
 export async function disableLock() {
   if (!dek) return
-  for (const k of await allKeys()) {
-    const v = await raw<unknown>(k)
-    if (isSealed(v)) await raw(k, await unseal(k, v))
-  }
-  await raw(LOCK, null)
-  lockOn = Promise.resolve(false)
-  dek = dekRaw = null
+  await raw(MIG, await seal(MIG, 'off'))
+  migrating = 'off'
+  await finishOff()
 }
 
 /** Rough passcode strength in bits (character pool × length, penalised for repeats and sequences). */

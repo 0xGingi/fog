@@ -90,10 +90,16 @@ struct App {
     wakes: mpsc::UnboundedSender<(String, u32, bool)>,
 }
 
-/// Token buckets keyed by e.g. "send:<account>" or "signup:<ip>".
+/// Token buckets keyed by e.g. "send:<account>" or "signup:<ip>": (tokens, last update, when it's full
+/// again). A full bucket is the same as no entry, so entries are dropped once refilled, and the map is
+/// capped: past the cap, new keys are refused (fail closed) rather than letting anyone grow memory.
 // ponytail: in-memory, per process. Move to Redis if fog-server ever runs as several replicas.
-#[derive(Default)]
-struct Limiter(Mutex<HashMap<String, (f64, Instant)>>);
+struct Limiter(Mutex<HashMap<String, (f64, Instant, Instant)>>, usize);
+impl Default for Limiter {
+    fn default() -> Self {
+        Limiter(Mutex::default(), 500_000)
+    }
+}
 
 impl Limiter {
     /// Allow one event at `rate` per second with bursts up to `burst`.
@@ -103,19 +109,27 @@ impl Limiter {
     fn take(&self, key: &str, rate: f64, burst: f64, n: f64) -> bool {
         let mut m = self.0.lock().unwrap();
         let now = Instant::now();
-        let (tokens, at) = m.entry(key.to_owned()).or_insert((burst, now));
+        if !m.contains_key(key) && m.len() >= self.1 {
+            m.retain(|_, (_, _, full)| *full > now);
+            if m.len() >= self.1 {
+                return false;
+            }
+        }
+        let (tokens, at, full) = m.entry(key.to_owned()).or_insert((burst, now, now));
         *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(burst);
         *at = now;
-        if *tokens >= n {
+        let ok = *tokens >= n;
+        if ok {
             *tokens -= n;
-            true
-        } else {
-            false
         }
+        // Buckets that never refill (rate 0) are keyed by day, so a day and a bit is enough.
+        let secs = if rate > 0.0 { ((burst - *tokens) / rate).min(86_400.0 * 2.0) } else { 90_000.0 };
+        *full = now + Duration::from_secs_f64(secs.max(0.0));
+        ok
     }
     fn prune(&self) {
-        let cutoff = Instant::now() - Duration::from_secs(86_400);
-        self.0.lock().unwrap().retain(|_, (_, at)| *at > cutoff);
+        let now = Instant::now();
+        self.0.lock().unwrap().retain(|_, (_, _, full)| *full > now);
     }
 }
 
@@ -253,7 +267,8 @@ async fn main() {
         .route("/link", get(link_upgrade))
         .route("/blob/{id}", get(get_blob).put(put_blob).layer(DefaultBodyLimit::max(MAX_BLOB as usize)))
         .route("/blob/{id}/offset", get(blob_offset))
-        .route("/sealed", post(post_sealed).layer(DefaultBodyLimit::max(MAX_BODY * 2)));
+        .route("/sealed", post(post_sealed).layer(DefaultBodyLimit::max(MAX_BODY * 2)))
+        .route("/sealed/bundles", post(post_sealed_bundles));
     // Production: serve the built web app: landing page at /, app at /app/, hashed assets cached
     // forever, unknown paths a 404 with the landing page.
     if let Some(dir) = env("FOG_WEB").map(PathBuf::from) {
@@ -308,6 +323,7 @@ fn migrate_devices(db: &Connection) {
         .expect("migrate messages");
     }
     db.execute("CREATE INDEX IF NOT EXISTS messages_device ON messages(recipient, device, id)", []).expect("index");
+    db.execute("CREATE INDEX IF NOT EXISTS messages_sender ON messages(recipient, sender)", []).expect("index");
     for (table, cols) in [("prekeys", "id, key"), ("kyber_prekeys", "id, key, sig")] {
         if has(table, "device") {
             continue;
@@ -511,6 +527,52 @@ fn rotate_server_cert(db: &Connection, trust_file: &str) {
     println!("Issued server certificate #{id}. Restart fog-server to use it.");
 }
 
+/// Prekey bundles for a contact's devices, fetched without logging in (gated by their access key), so
+/// a sealed sender repairing a stale device list doesn't reveal who it is.
+#[derive(Deserialize)]
+struct SealedBundles {
+    to: String,
+    access: String,
+    /// Only these devices (the ones a sealed send was missing). Omitted: every device.
+    #[serde(default)]
+    devices: Option<Vec<u32>>,
+}
+
+/// Does `access` match the account's sealed-sender access key? (Constant time.)
+fn access_ok(db: &Connection, to: &str, access: &str) -> bool {
+    let key: Option<Option<String>> = db.query_row("SELECT access FROM accounts WHERE id=?", [to], |r| r.get(0)).optional().ok().flatten();
+    key.flatten().is_some_and(|a| a.len() == access.len() && a.bytes().zip(access.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0)
+}
+
+async fn post_sealed_bundles(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, body: String) -> Response {
+    let ip = client_ip(&app, &headers, peer);
+    if !app.limits.allow(&format!("sealed-bundles:{}", ip_key(ip)), 10.0, 300.0) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let Ok(req) = serde_json::from_str::<SealedBundles>(&body) else { return StatusCode::BAD_REQUEST.into_response() };
+    if !valid_id(&req.to) || req.access.len() > 64 || req.devices.as_ref().is_some_and(|d| d.len() > MAX_DEVICES as usize) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let db = app.db.lock().unwrap();
+    if !access_ok(&db, &req.to, &req.access) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    // Each fetch uses up one-time prekeys, so contacts get a budget per recipient too.
+    if !app.limits.allow(&format!("sealed-bundles-to:{}", req.to), 10.0, 300.0) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let active = active_devices(&db, &req.to);
+    let devices: Vec<u32> = match req.devices {
+        Some(want) => want.into_iter().filter(|d| active.contains(d)).collect(),
+        None => active,
+    };
+    let bundles: Result<Vec<Value>, String> = devices.into_iter().map(|d| Ok(json!({"device": d, "bundle": bundle(&app, &db, &req.to, d, None)?}))).collect();
+    match bundles {
+        Ok(b) => axum::Json(json!({"bundles": b})).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct SealedSend {
     to: String,
@@ -550,9 +612,7 @@ async fn post_sealed(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(
     let ts = now_ms();
     let ids = {
         let db = app.db.lock().unwrap();
-        let access: Option<Option<String>> = db.query_row("SELECT access FROM accounts WHERE id=?", [&req.to], |r| r.get(0)).optional().ok().flatten();
-        let ok = access.flatten().is_some_and(|a| a.len() == req.access.len() && a.bytes().zip(req.access.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0);
-        if !ok {
+        if !access_ok(&db, &req.to, &req.access) {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         // Charged only after the access key checks out, so strangers can't drain a contact's bucket.
@@ -774,12 +834,18 @@ async fn blob_offset(Path(id): Path<String>, State(app): State<Shared>) -> Respo
 }
 
 /// Anyone with the id can fetch the ciphertext; without the key from the message it's useless.
-async fn get_blob(Path(id): Path<String>, State(app): State<Shared>) -> Response {
+/// Downloads come out of a budget per network (about 7 GB an hour, 8 GB at once), so a known id can't be
+/// used to make the server read and send the same big file over and over.
+async fn get_blob(Path(id): Path<String>, State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
     if !blob_id_ok(&id) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let Ok(file) = tokio::fs::File::open(app.blobs.join(&id)).await else { return StatusCode::NOT_FOUND.into_response() };
     let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let mb = (len as f64 / 1_048_576.0).ceil().max(1.0);
+    if !app.limits.take(&format!("blob-read:{}", ip_key(client_ip(&app, &headers, peer))), 2.0, 8192.0, mb) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
     (
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_string()),
@@ -866,6 +932,25 @@ fn main_device() -> u32 {
     MAIN_DEVICE
 }
 
+/// Device 1's login. `recorded`: None when the account doesn't exist yet, Some(None) for an account that
+/// never recorded a main-device key. Ok(Some(key)): record that key for such an account.
+fn main_login(recorded: Option<Option<&str>>, claimed: Option<&str>, signed: impl Fn(&str) -> bool, legacy_ok: bool) -> Result<Option<String>, &'static str> {
+    match recorded {
+        Some(Some(key)) => signed(key).then_some(None).ok_or("bad_auth"),
+        // Signing up: the account doesn't exist yet. Its main-device key must sign this login, and is
+        // recorded when the account is created.
+        None => matches!(claimed, Some(key) if signed(key)).then_some(None).ok_or("bad_auth"),
+        // An account from before main-device keys that never recorded one. Accepting a key now would let
+        // anyone holding just the identity key (a linked or stolen device) claim the main device, so it's
+        // refused, unless this server still has such accounts and opts in to migrate them.
+        Some(None) if legacy_ok => match claimed {
+            Some(key) if signed(key) => Ok(Some(key.to_string())),
+            _ => Err("bad_auth"),
+        },
+        Some(None) => Err("bad_auth"),
+    }
+}
+
 /// Which devices may log in. Every device holds the identity key, so that alone can't tell them
 /// apart: device 1 must also sign with the main-device key (derived from the recovery phrase, which
 /// linked devices never get), and linked devices must be on the account's device list.
@@ -877,20 +962,11 @@ fn authorize(app: &App, me: &str, auth: &Auth, challenge: &[u8]) -> Result<(), &
     let main: Option<Option<String>> = db.query_row("SELECT main FROM accounts WHERE id=?", [me], |r| r.get(0)).optional().map_err(|_| "bad_auth")?;
     if auth.device == MAIN_DEVICE {
         let signed = |key: &str| auth.msig.as_ref().and_then(|s| B64.decode(s).ok()).is_some_and(|s| verify(key, challenge, &s));
-        return match main.flatten() {
-            Some(key) => signed(&key).then_some(()).ok_or("bad_auth"),
-            // First login since multi-device (or a new account): remember the main-device key.
-            None => match &auth.main {
-                Some(key) if signed(key) => {
-                    // Existing account: record it now (a brand-new one gets it when it's created).
-                    db.execute("UPDATE accounts SET main=? WHERE id=? AND main IS NULL", params![key, me]).map_err(|_| "bad_auth")?;
-                    Ok(())
-                }
-                Some(_) => Err("bad_auth"),
-                // ponytail: older clients log in without it until they reload; drop once they're gone.
-                None => Ok(()),
-            },
-        };
+        let record = main_login(main.as_ref().map(|m| m.as_deref()), auth.main.as_deref(), signed, std::env::var_os("FOG_LEGACY_MAIN_LOGIN").is_some())?;
+        if let Some(key) = record {
+            db.execute("UPDATE accounts SET main=? WHERE id=? AND main IS NULL", params![key, me]).map_err(|_| "bad_auth")?;
+        }
+        return Ok(());
     }
     // Linked devices sign with their own login key, so knowing the identity key isn't enough to
     // sign in as one (for instance, from a device that's been unlinked).
@@ -1188,6 +1264,10 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
         return json!({"rid": rpc.rid, "error": "slow_down"});
     }
     if let Req::Send { to, .. } = &rpc.req {
+        // Checked before it becomes part of a limiter key: arbitrary strings would grow the limiter.
+        if !valid_id(to) {
+            return json!({"rid": rpc.rid, "error": "not_found"});
+        }
         if !app.limits.allow(&format!("send-to:{me}:{to}"), 5.0, 100.0) {
             return json!({"rid": rpc.rid, "error": "slow_down"});
         }
@@ -1367,13 +1447,13 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
             .map_err(e)?
             .map(|u| json!({"id": id, "username": u}))
             .ok_or_else(|| "not_found".into()),
-        Req::Bundle { id, device } => Ok(json!({"bundle": bundle(app, db, &id, device.unwrap_or(MAIN_DEVICE))?})),
+        Req::Bundle { id, device } => Ok(json!({"bundle": bundle(app, db, &id, device.unwrap_or(MAIN_DEVICE), Some(me))?})),
         Req::Bundles { id } => {
             let devices: Vec<u32> = active_devices(db, &id).into_iter().filter(|d| !(id == me && *d == cx.device)).collect();
             if devices.is_empty() && id != me {
                 return Err("not_found".into());
             }
-            let bundles: Result<Vec<Value>, String> = devices.into_iter().map(|d| Ok(json!({"device": d, "bundle": bundle(app, db, &id, d)?}))).collect();
+            let bundles: Result<Vec<Value>, String> = devices.into_iter().map(|d| Ok(json!({"device": d, "bundle": bundle(app, db, &id, d, Some(me))?}))).collect();
             Ok(json!({"bundles": bundles?}))
         }
         Req::Ack { id } => {
@@ -1510,7 +1590,12 @@ fn pending_devices(db: &Connection, account: &str) -> Vec<u32> {
 }
 
 /// A device's prekey bundle, consuming one one-time EC and one one-time Kyber prekey if available.
-fn bundle(app: &App, db: &Connection, id: &str, device: u32) -> Result<Value, String> {
+/// A device's prekey bundle. Fetching one uses up a one-time prekey (EC and Kyber), so they're handed out
+/// on a budget: each requester gets a few per device per day (`requester`; None for anonymous fetches,
+/// which are already gated by the access key), and each device a few per hour overall. Past that the
+/// bundle carries only the signed and last-resort keys, which still make a working session, so repeated
+/// lookups can't drain a device that's offline.
+fn bundle(app: &App, db: &Connection, id: &str, device: u32, requester: Option<&str>) -> Result<Value, String> {
     let e = |e: rusqlite::Error| e.to_string();
     let keys: String = db
         .query_row("SELECT keys FROM devices WHERE account=? AND id=? AND keys IS NOT NULL", params![id, device], |r| r.get(0))
@@ -1518,6 +1603,10 @@ fn bundle(app: &App, db: &Connection, id: &str, device: u32) -> Result<Value, St
         .map_err(e)?
         .ok_or("not_found")?;
     let mut bundle: Value = serde_json::from_str(&keys).map_err(|x| x.to_string())?;
+    let one_time = requester.is_none_or(|r| app.limits.allow(&format!("otpk-pair:{r}:{id}.{device}"), 3.0 / 86_400.0, 3.0)) && app.limits.allow(&format!("otpk:{id}.{device}"), 20.0 / 3600.0, 20.0);
+    if !one_time {
+        return Ok(bundle);
+    }
     let pk: Option<(u32, String)> = db
         .query_row(
             "DELETE FROM prekeys WHERE rowid = (SELECT rowid FROM prekeys WHERE account=? AND device=? LIMIT 1) RETURNING id, key",
@@ -1549,6 +1638,12 @@ fn bundle(app: &App, db: &Connection, id: &str, device: u32) -> Result<Value, St
     Ok(bundle)
 }
 
+/// One identified sender's part of a recipient's queue: a quarter of it, by count and by bytes.
+fn sender_share_full(db: &Connection, to: &str, from: &str) -> bool {
+    db.query_row("SELECT count(*), coalesce(sum(length(body)), 0) FROM messages WHERE recipient=? AND sender=?", [to, from], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+        .map_or(true, |(n, bytes)| n >= MAX_QUEUED_PER_RECIPIENT / 4 || bytes >= MAX_QUEUED_BYTES / 4)
+}
+
 /// A recipient's offline queue is capped by count and bytes, so nobody can fill it to lock them out.
 fn queue_full(db: &Connection, to: &str) -> bool {
     db.query_row("SELECT count(*), coalesce(sum(length(body)), 0) FROM messages WHERE recipient=?", [to], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
@@ -1575,6 +1670,11 @@ fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg], urgent: bool, cal
             return Ok(mismatch);
         }
         if queue_full(&db, to) {
+            return Err("recipient_full".into());
+        }
+        // One sender can't take up an offline recipient's whole queue and lock everyone else out.
+        // (Your own devices are exempt: that's syncing, not someone else's queue.)
+        if to != me && sender_share_full(&db, to, me) {
             return Err("recipient_full".into());
         }
         let mut ids = vec![];
@@ -1666,6 +1766,23 @@ mod tests {
     }
 
     #[test]
+    fn main_device_login_needs_the_main_key() {
+        let good = |k: &str| k == "real";
+        // An account with a recorded key: only a signature by it.
+        assert_eq!(main_login(Some(Some("real")), None, good, false), Ok(None));
+        assert_eq!(main_login(Some(Some("real")), Some("other"), |k| k == "other", false), Err("bad_auth"));
+        // Signing up: must bring and sign with a main-device key.
+        assert_eq!(main_login(None, Some("real"), good, false), Ok(None));
+        assert_eq!(main_login(None, None, good, false), Err("bad_auth"));
+        assert_eq!(main_login(None, Some("forged"), good, false), Err("bad_auth"));
+        // A legacy account without one: refused, with or without a key, unless the server opts in.
+        assert_eq!(main_login(Some(None), None, good, false), Err("bad_auth"));
+        assert_eq!(main_login(Some(None), Some("real"), good, false), Err("bad_auth"));
+        assert_eq!(main_login(Some(None), None, good, true), Err("bad_auth"));
+        assert_eq!(main_login(Some(None), Some("real"), good, true), Ok(Some("real".into())));
+    }
+
+    #[test]
     fn dev_mode_accepts_only_local_hosts() {
         for h in ["localhost", "localhost:5173", "127.0.0.1:8787", "[::1]:8787", "[::1]"] {
             assert!(is_local_host(h), "{h}");
@@ -1730,6 +1847,36 @@ mod tests {
         assert!((0..5).all(|_| l.allow("k", 0.0, 5.0)));
         assert!(!l.allow("k", 0.0, 5.0));
         assert!(l.allow("other", 0.0, 5.0));
+    }
+
+    #[test]
+    fn limiter_is_bounded() {
+        let l = Limiter(Mutex::default(), 3);
+        // Refilled buckets (fast rate) are dropped when room is needed; busy ones aren't.
+        assert!(l.allow("busy", 0.0, 1.0));
+        for k in ["a", "b"] {
+            assert!(l.allow(k, 1e9, 1.0));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(l.allow("new", 0.0, 1.0), "room made by dropping refilled buckets");
+        assert!(!l.allow("busy", 0.0, 1.0), "still remembered: not refilled");
+        // Full of buckets that don't refill: new keys are refused, existing ones keep working.
+        assert!(l.allow("x", 0.0, 2.0));
+        assert!(!l.allow("y", 0.0, 1.0), "past the cap");
+        assert!(l.allow("x", 0.0, 2.0));
+        l.prune();
+        assert_eq!(l.0.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn one_sender_gets_a_quarter_of_a_queue() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY, recipient TEXT, device INTEGER, sender TEXT, sender_device INTEGER, body TEXT, ts INTEGER);").unwrap();
+        let add = |from: &str, n: i64| (0..n).for_each(|_| drop(db.execute("INSERT INTO messages(recipient, device, sender, sender_device, body, ts) VALUES('bob', 1, ?, 1, 'x', 0)", [from])));
+        add("spammer", MAX_QUEUED_PER_RECIPIENT / 4);
+        assert!(sender_share_full(&db, "bob", "spammer"));
+        assert!(!sender_share_full(&db, "bob", "alice"), "others can still write");
+        assert!(!queue_full(&db, "bob"));
     }
 
     #[test]

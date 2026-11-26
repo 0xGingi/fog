@@ -36,7 +36,7 @@ fog-bot run
   (default `~/.fog-bot`, one folder per bot; it holds the keys, keep it private).
 - The API listens on `127.0.0.1:8790` (`--port`, `--host`). Only expose it beyond localhost if the user
   understands that the token then gives full control of the account.
-- Only one `fog-bot run` per folder; while it runs, `allow`/`info` refuse (stop it first).
+- Only one `fog-bot run` per folder. `fog-bot allow` works while it runs (it picks up changes within a second); `info` needs it stopped.
 
 Keep it running as a service. macOS (`~/Library/LaunchAgents/org.getfog.bot.plist`, then
 `launchctl load` it):

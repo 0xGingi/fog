@@ -1159,6 +1159,7 @@ function Settings({ onClose }: { onClose: () => void }) {
   useEffect(() => void db.lockEnabled().then(setLockOn), [dialog])
   const blocked = useFog((s) => s.blocked)
   const backup = useFog((s) => s.backup)
+  const [startOver, setStartOver] = useState(false)
   const file = useRef<HTMLInputElement>(null)
   const saveName = () => name.trim() !== profile.name && fog.setProfile({ name: name.trim() })
   const display = profile.name || (me.username ? `@${me.username}` : 'You')
@@ -1326,7 +1327,39 @@ function Settings({ onClose }: { onClose: () => void }) {
               }
               right={<Toggle label="Back up chats" on={settings.backup !== false} onChange={(v) => fog.updateSettings({ backup: v })} />}
             />
-            {settings.backup !== false && <Row icon="upload" title="Back up now" onClick={() => void fog.backupNow(true)} />}
+            {backup.restoreFailed && (
+              <div className="mx-1 my-2 rounded-2xl bg-danger/10 p-3 text-sm">
+                <p className="font-semibold">Your chat backup couldn't be restored</p>
+                <p className="mt-1 text-muted">Fog keeps your old backup and won't make a new one until it's restored, so those chats aren't lost. Check your connection and try again.</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button className="h-9 px-3 text-sm" onClick={() => void fog.retryRestore()}>
+                    Try again
+                  </Button>
+                  <Button kind="ghost" className="h-9 px-3 text-sm" onClick={() => setStartOver(true)}>
+                    Start over without them
+                  </Button>
+                </div>
+              </div>
+            )}
+            {startOver && (
+              <Dialog
+                title="Start over without your old chats?"
+                onClose={() => setStartOver(false)}
+                actions={
+                  <>
+                    <Button kind="ghost" onClick={() => setStartOver(false)}>
+                      Cancel
+                    </Button>
+                    <Button kind="danger" onClick={() => (setStartOver(false), void fog.skipRestore())}>
+                      Replace the backup
+                    </Button>
+                  </>
+                }
+              >
+                <p className="text-[15px] text-muted">Your next backup replaces the old one on the server, and the chats in it can't be brought back after that.</p>
+              </Dialog>
+            )}
+            {settings.backup !== false && !backup.restoreFailed && <Row icon="upload" title="Back up now" onClick={() => void fog.backupNow(true)} />}
             <p className="px-3 pt-1 text-sm text-muted">
               Your messages, contacts and groups, encrypted on this device with a key from your recovery phrase. The server keeps only the latest copy and can't read it. Restore your account with the phrase on a new phone and your chats come back. Photos and files come back for as long as the server keeps them (45 days).
             </p>

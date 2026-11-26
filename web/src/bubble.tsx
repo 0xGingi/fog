@@ -4,7 +4,7 @@ import * as fog from './fog'
 import { attLabel, chatTitle, msgStatus, personName, timerLabel, useFog, type Chat, type LinkPreview, type Msg } from './fog'
 import { fmtDur as dur } from './media'
 import { cycleRate, download, fmtDur, fmtSize, localBlob, posterNow, saveFile, seek, thumbIsBlank, togglePlay, useLocalUrl, usePlayer, useTransfer, type Att } from './media'
-import { Avatar, copy, Icon, Menu, MenuItem, Spinner, usePressMenu, Zoomable, type MenuAt } from './ui'
+import { Avatar, Button, copy, Dialog, Icon, Menu, MenuItem, Spinner, usePressMenu, Zoomable, type MenuAt } from './ui'
 import { Md, mdPlain, openLink } from './markdown'
 
 // ---------- formatting ----------
@@ -353,6 +353,7 @@ export function Bubble(props: BubbleProps) {
   const groupIn = !!chat.group && !m.mine
   const media = a && (a.kind === 'photo' || a.kind === 'video' || a.kind === 'videonote')
   const myReaction = m.re?.me
+  const [askOpen, setAskOpen] = useState(false)
 
   const handlers = selecting
     ? { onClick: onSelect }
@@ -390,12 +391,12 @@ export function Bubble(props: BubbleProps) {
   const meta = (
     <span className={`flex items-center gap-1 text-[11.5px] whitespace-nowrap ${m.mine ? 'text-out-meta' : 'text-muted'}`} title={fullDate(m.ts)}>
       {m.ttl && <Icon name="timer" className="size-3.5" />}
-      {m.only && <span title="Only you can see this message">only you</span>}
+      {m.only && <span title="The sender says they sent this to you alone. Fog can't check what they sent anyone else.">to you</span>}
       {m.edited && <span>edited</span>}
       {fmtTime(m.ts)}
       {m.mine &&
         (status === 'failed' ? (
-          <button onClick={(e) => (e.stopPropagation(), fog.retry(chat.id, m))} className="font-semibold text-danger underline" aria-label="Retry sending">
+          <button onClick={(e) => (e.stopPropagation(), m.sealFail ? setAskOpen(true) : fog.retry(chat.id, m))} className="font-semibold text-danger underline" aria-label="Retry sending">
             Retry
           </button>
         ) : (
@@ -515,6 +516,25 @@ export function Bubble(props: BubbleProps) {
         >
           <Icon name="smile" className="size-5" />
         </button>
+      )}
+      {askOpen && (
+        <Dialog
+          title="Send without hiding that it's from you?"
+          onClose={() => setAskOpen(false)}
+          actions={
+            <>
+              <Button kind="ghost" onClick={() => setAskOpen(false)}>
+                Don't send
+              </Button>
+              <Button onClick={() => (setAskOpen(false), void fog.retry(chat.id, m, true))}>Send anyway</Button>
+            </>
+          }
+        >
+          <p className="text-[15px] text-muted">
+            Fog normally sends messages so the server can't see who they're from. The server refused to deliver this one that way. That happens when the other person changed their privacy key or blocked you, but a server could also do it on purpose to find out who's writing to whom.
+          </p>
+          <p className="mt-2 text-[15px] text-muted">Sending anyway lets the server see this message is from you. Its contents stay end-to-end encrypted.</p>
+        </Dialog>
       )}
       {dx < 0 && (
         <span className="absolute right-0 bottom-2 grid size-8 place-items-center rounded-full bg-black/25 text-white" style={{ opacity: Math.min(1, -dx / 56), transform: `scale(${-dx >= 56 ? 1.1 : 0.8})` }}>

@@ -68,6 +68,8 @@ export type Msg = {
   only?: string
   /** In this thread (not the main conversation). */
   th?: string
+  /** Not sent: the recipient's server refused it as a sealed (anonymous) message. Sending it anyway would reveal it's from us. */
+  sealFail?: boolean
 }
 export type Group = {
   members: string[]
@@ -130,7 +132,7 @@ export type State = {
   /** Our devices, from the server. */
   devices: DeviceInfo[]
   /** Chat backup (main device): when the last one was made, and whether one is being made now. */
-  backup: { at: number | null; busy: boolean }
+  backup: { at: number | null; busy: boolean; /** Restoring from the backup failed: no new backup until it works or you choose to start over. */ restoreFailed?: boolean }
   /** A bot answered a tap with something to read, or a form to fill in. */
   alert: { text: string; at: number; from: string } | null
   form: { chat: string; msg: string; bot: string; form: Form } | null
@@ -160,8 +162,8 @@ type Payload = (
   | { t: 'btn'; id: string; d: string; q: string; v?: string[]; f?: Record<string, string> }
   /** The bot's answer to a tap: something to show, or a form to fill in. */
   | { t: 'btnack'; q: string; text?: string; alert?: 1; form?: Form }
-  /** A thread was started, or renamed (newer `v` wins). */
-  | { t: 'thread'; id: string; name: string; root?: string; v: number }
+  /** A thread was started, or renamed (newer `v` wins). `by` (from the group owner): catching a new member up on an existing thread. */
+  | { t: 'thread'; id: string; name: string; root?: string; v: number; by?: string }
   /** Bots: suggestions for a command option as you type it, and the bot's answer. */
   | { t: 'auto'; q: string; cmd: string; opt: string; val: string; /** everything typed after the command */ args?: string }
   | { t: 'autoans'; q: string; o: { l: string; v: string }[] }
@@ -435,6 +437,8 @@ export async function createAccount(phrase: string): Promise<void> {
   pinnedTrust = null
   await saveAccount()
   await kv('uploaded', null)
+  // Until the old backup is back (or turns out not to exist), nothing may replace it on the server.
+  await kv('restore', true)
   set({ me: { id: acct.id, username: null, device: acct.device, main: true } })
   await saveMeta()
   signupError = null
@@ -448,7 +452,7 @@ export async function createAccount(phrase: string): Promise<void> {
     throw new Error(signupError)
   }
   // Restoring from the phrase: the chats come back from the backup, if there is one.
-  await restoreBackup().catch(() => toast("Your account is back, but its chat backup couldn't be restored."))
+  await tryRestore()
   // A brand-new account starts with the guide, as a first chat to try things in.
   if (!Object.keys(state.chats).length) guide?.start()
   set({ phase: state.me?.username ? 'app' : 'username' })
@@ -475,7 +479,11 @@ export function updateSettings(patch: Partial<Settings>) {
   saveMeta()
   if ('notifications' in patch) registerPush()
   // Backups off: delete the copy on the server too. Back on: make one now.
-  if (patch.backup === false && acct?.is_main) rpc({ t: 'backup', id: '' }).then(() => kv('backup', null), () => {})
+  // (Not while the old backup is still waiting to be restored: it may be the only copy of those chats.)
+  if (patch.backup === false && acct?.is_main)
+    void kv('restore').then((waiting) => {
+      if (!waiting) rpc({ t: 'backup', id: '' }).then(() => kv('backup', null), () => {})
+    })
   if (patch.backup === true) void backupNow(true)
 }
 
@@ -695,7 +703,8 @@ async function onPush(m: any) {
       // Register our access key before anything else goes out (the RPC layer only works once online).
       await rpc({ t: 'access', key: myAk }).catch(() => {})
       registerPush()
-      if (acct!.is_main) void backupSoon()
+      // A restore that didn't finish (or failed) goes first: a backup made before it would replace the old one.
+      if (acct!.is_main) void (async () => ((await kv('restore')) ? (await tryRestore()) && backupSoon() : backupSoon()))()
       retryPending()
       if (state.phase === 'app') handleInvite()
       break
@@ -892,6 +901,8 @@ const BACKUP_EVERY = 24 * 3_600_000
 export async function backupNow(force = false) {
   if (!acct?.is_main || state.backup.busy || state.conn !== 'online' || typeof CompressionStream === 'undefined') return
   if (!force && state.settings.backup === false) return
+  // Never replace a backup we haven't restored yet: it may hold the only copy of the old chats.
+  if (await kv('restore')) return void (force && toast("Your old chats haven't been restored yet, so Fog won't replace their backup. Try restoring again in Settings."))
   set({ backup: { ...state.backup, busy: true } })
   try {
     const { data, json } = await packArchive(true)
@@ -913,6 +924,34 @@ async function backupSoon() {
   const last = await kv<{ at: number }>('backup')
   if (last) set({ backup: { ...state.backup, at: last.at } })
   if (!last || Date.now() - last.at > BACKUP_EVERY) setTimeout(() => void backupNow(), 30_000)
+}
+
+/** Restore from the backup, once at a time. True when done (or there was nothing to restore). */
+let restoring: Promise<boolean> | null = null
+function tryRestore() {
+  return (restoring ??= (async () => {
+    try {
+      await restoreBackup()
+      await kv('restore', null)
+      set({ backup: { ...state.backup, restoreFailed: false } })
+      return true
+    } catch {
+      set({ backup: { ...state.backup, restoreFailed: true } })
+      toast("Your account is back, but its chat backup couldn't be restored yet. Fog keeps the old backup until it is.")
+      return false
+    } finally {
+      restoring = null
+    }
+  })())
+}
+export async function retryRestore() {
+  if (await tryRestore()) void backupSoon()
+}
+/** Give up on the old backup and start fresh: the next backup replaces it. Only on the user's say-so. */
+export async function skipRestore() {
+  await kv('restore', null)
+  set({ backup: { ...state.backup, restoreFailed: false } })
+  await backupNow(true)
 }
 
 /** After restoring an account from its phrase: bring back the chats from its backup, if there is one. */
@@ -1015,8 +1054,31 @@ async function senderCert() {
   return cert.b
 }
 
-/** Make sure we have sessions with each of these devices of `peer`, fetching their prekey bundles. */
-async function ensureSessions(peer: string, devices?: number[]) {
+/**
+ * Prekey bundles for a contact, fetched without logging in: the request carries their access key
+ * instead of who we are, so asking doesn't tell the server who's about to write to them.
+ */
+async function sealedBundles(peer: string, access: string, devices?: number[]): Promise<{ device: number; bundle: unknown }[]> {
+  const r = await fetch(`${SERVER.origin}/sealed/bundles`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: peer, access, devices }) })
+  if (r.status === 401) throw new SealedRefused()
+  if (!r.ok) throw new Error(`bundles ${r.status}`)
+  return (await r.json()).bundles
+}
+/** A contact's server refused our sealed send. Retrying in the open would tell the server it's us, so that's the user's call. */
+export class SealedRefused extends Error {
+  constructor() {
+    super('sealed_refused')
+  }
+}
+
+/** Make sure we have sessions with each of these devices of `peer`, fetching their prekey bundles. With their access key (`ak`), anonymously. */
+async function ensureSessions(peer: string, devices?: number[], ak?: string) {
+  if (ak) {
+    const need = devices?.filter((d) => !acct!.has_session(peer, d))
+    if (need && !need.length) return
+    for (const b of await sealedBundles(peer, ak, need)) if (!acct!.has_session(peer, b.device)) acct!.start_session(peer, b.device, JSON.stringify(b.bundle), Date.now())
+    return
+  }
   if (!devices) {
     const { bundles } = await rpc({ t: 'bundles', id: peer })
     for (const b of bundles) if (!acct!.has_session(peer, b.device)) acct!.start_session(peer, b.device, JSON.stringify(b.bundle), Date.now())
@@ -1029,9 +1091,9 @@ async function ensureSessions(peer: string, devices?: number[]) {
   }
 }
 /** The server says our device list for `peer` is stale: forget removed devices, add new ones. */
-async function fixDevices(peer: string, m: { missing?: number[]; extra?: number[] }) {
+async function fixDevices(peer: string, m: { missing?: number[]; extra?: number[] }, ak?: string) {
   for (const d of m.extra ?? []) acct!.drop_session(peer, d)
-  await ensureSessions(peer, m.missing ?? [])
+  await ensureSessions(peer, m.missing ?? [], ak)
 }
 
 /**
@@ -1039,7 +1101,7 @@ async function fixDevices(peer: string, m: { missing?: number[]; extra?: number[
  * you). To contacts who've shared their access key it goes sealed (the server never learns it was
  * from us); otherwise, e.g. a first message to a stranger, it's a normal send.
  */
-function deliver(peer: string, p: Payload) {
+function deliver(peer: string, p: Payload, opts: { openOk?: boolean } = {}) {
   return serial(async () => {
     const self = peer === acct!.id
     const bytes = pad(te.encode(JSON.stringify(p)))
@@ -1051,7 +1113,7 @@ function deliver(peer: string, p: Payload) {
     let ak = self ? undefined : state.people[peer]?.ak
     let akRequest = false
     const targets = () => Array.from(acct!.session_devices(peer)).filter((d) => !(self && d === acct!.device))
-    if (!targets().length) await ensureSessions(peer)
+    if (!targets().length) await ensureSessions(peer, undefined, ak)
     // Each try encrypts for the devices we know; a stale list is corrected and we go again.
     for (let attempt = 0; attempt < 4; attempt++) {
       const devices = targets()
@@ -1063,13 +1125,15 @@ function deliver(peer: string, p: Payload) {
         const r = await fetch(`${SERVER.origin}/sealed`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ to: peer, msgs, access: ak, urgent, call }) })
         if (r.ok) return
         if (r.status === 409) {
-          await fixDevices(peer, await r.json())
+          await fixDevices(peer, await r.json(), ak)
           continue
         }
         // Anything but "wrong access key" fails the send instead of quietly revealing who we are.
         if (r.status !== 401) throw new Error(`sealed send failed: ${r.status}`)
-        // Their key changed (or they blocked us). Like Signal, fall back to a normal send, and ask
-        // for the new key so later messages go sealed again.
+        // Their key changed, they blocked us, or the server is trying to make us reveal ourselves. A
+        // normal send would tell the server who's writing to them, so it only happens if the user says so.
+        // (Then, like Signal, we ask for their new key so later messages go sealed again.)
+        if (!opts.openOk) throw new SealedRefused()
         setPerson(peer, { ak: undefined })
         ak = undefined
         akRequest = true
@@ -1103,17 +1167,20 @@ function mirror(p: Payload) {
 }
 
 /** Send to one person in a chat (in a group: tagged as group traffic, so it shows in the group). */
-async function deliverTo(chatId: string, who: string, p: Payload) {
+async function deliverTo(chatId: string, who: string, p: Payload, opts: { openOk?: boolean } = {}) {
   const c = state.chats[chatId]
   if (!c || c.group?.left || !others(c).includes(who)) throw new Error('not in this chat')
-  await deliver(who, c.group ? { ...p, g: chatId, gv: c.group.v, gh: c.group.hash } : p)
+  await deliver(who, c.group ? { ...p, g: chatId, gv: c.group.v, gh: c.group.hash } : p, opts)
 }
 
 /** Send to a chat: one peer, or every other group member (each with its own Signal session). */
-async function deliverChat(chatId: string, p: Payload) {
+async function deliverChat(chatId: string, p: Payload, opts: { openOk?: boolean } = {}) {
   const c = state.chats[chatId]
   if (!c || c.group?.left) return
-  await Promise.all(others(c).map((m) => deliver(m, c.group ? { ...p, g: chatId, gv: c.group.v, gh: c.group.hash } : p)))
+  // Settle every member's copy before reporting, so one refusal doesn't hide another member's failure.
+  const results = await Promise.allSettled(others(c).map((m) => deliver(m, c.group ? { ...p, g: chatId, gv: c.group.v, gh: c.group.hash } : p, opts)))
+  const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+  if (failed.length) throw failed.find((r) => r.reason instanceof SealedRefused)?.reason ?? failed[0].reason
 }
 
 const patchMsg = (chat: string, id: string, patch: Partial<Msg>) => setMsgs(chat, (ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)))
@@ -1135,11 +1202,11 @@ function rotateAccessKey() {
 }
 
 /** Profiles are shared lazily: only with people we write to (like Signal's profile keys). */
-async function shareProfile(peer: string) {
+async function shareProfile(peer: string, openOk = false) {
   if (isBlocked(peer)) return
   const p = state.profile
   if (state.people[peer]?.sent === p.v) return
-  await deliver(peer, { t: 'profile', name: p.name, avatar: p.avatar, ak: myAk, bot: p.bot })
+  await deliver(peer, { t: 'profile', name: p.name, avatar: p.avatar, ak: myAk, bot: p.bot }, { openOk })
   setPerson(peer, { sent: p.v })
 }
 
@@ -1181,7 +1248,7 @@ export async function sendAtt(chat: string, att: Att, text = '', reply?: string,
   await sendMessage(chat, text, { att, reply, th })
 }
 
-async function push(chat: string, m: Msg) {
+async function push(chat: string, m: Msg, openOk = false) {
   if (chat === SAVED && !otherDevices().length) return patchMsg(chat, m.id, { status: 'sent' })
   if (chat === GUIDE) return patchMsg(chat, m.id, { status: 'read' }), guide?.hear(m)
   try {
@@ -1191,7 +1258,7 @@ async function push(chat: string, m: Msg) {
       patchMsg(chat, m.id, { att })
     }
     const c = state.chats[chat]
-    for (const peer of c ? others(c) : []) await shareProfile(peer)
+    for (const peer of c ? others(c) : []) await shareProfile(peer, openOk)
     if (chat === SAVED) {
       mirror({ t: 'sent', chat, p: { t: 'text', id: m.id, text: m.text, ts: m.ts, reply: m.reply, att: att && wire(att) } })
       return patchMsg(chat, m.id, { status: 'sent' })
@@ -1199,14 +1266,15 @@ async function push(chat: string, m: Msg) {
     const p: Payload = { t: 'text', id: m.id, text: m.text, ts: m.ts, reply: m.reply, fwd: m.fwd, att: att && wire(att), ttl: m.ttl, men: m.men, poll: m.poll, link: m.link, ...botWire(m) }
     // Our other devices first, so they already have the message when the recipient's receipt arrives.
     mirror({ t: 'sent', chat, p: m.only ? { ...p, only: m.only } : p })
-    await (m.only ? deliverTo(chat, m.only, { ...p, only: 1 }) : deliverChat(chat, p))
-    patchMsg(chat, m.id, { status: 'sent' })
-  } catch {
-    patchMsg(chat, m.id, { status: 'failed' })
+    await (m.only ? deliverTo(chat, m.only, { ...p, only: 1 }, { openOk }) : deliverChat(chat, p, { openOk }))
+    patchMsg(chat, m.id, { status: 'sent', sealFail: undefined })
+  } catch (e) {
+    patchMsg(chat, m.id, { status: 'failed', sealFail: e instanceof SealedRefused || undefined })
   }
 }
 
-export const retry = (chat: string, m: Msg) => (patchMsg(chat, m.id, { status: 'sending' }), push(chat, m))
+/** Resend a failed message. `openOk`: the user agreed to send it without sealed sender (the server then learns it's from us). */
+export const retry = (chat: string, m: Msg, openOk = false) => (patchMsg(chat, m.id, { status: 'sending' }), push(chat, m, openOk))
 
 /** Resend anything that didn't make it while offline. Receivers dedupe by message id. */
 function retryPending() {
@@ -1502,6 +1570,13 @@ export const isBlocked = (id: string) => state.blocked.includes(id)
 /** Someone we've accepted: we started the chat, wrote to them, or accepted their request. */
 export const isTrusted = (id: string) => !isBlocked(id) && !!state.chats[id] && !state.chats[id].request
 
+/** Bots: treat a chat as an unanswered request again (no receipts or profile), e.g. after removing someone from the allowlist. */
+export function unaccept(chat: string) {
+  if (!state.chats[chat] || state.chats[chat].request) return
+  setChat(chat, (c) => ({ ...c, request: true }))
+  saveChatsSoon()
+}
+
 export function acceptRequest(chat: string) {
   setChat(chat, (c) => ({ ...c, request: undefined }))
   saveChats()
@@ -1613,6 +1688,9 @@ export async function updateGroup(id: string, patch: { name?: string; avatar?: s
   saveChats()
   await announce(id, patch.remove ?? [])
   if (patch.add?.length) shareWithGroup(id)
+  // New members don't have the history, so tell them which threads exist (and who started each).
+  const threads = Object.values(state.chats[id]?.threads ?? {}).filter((t) => t.v)
+  for (const m of patch.add ?? []) for (const t of threads) deliverTo(id, m, { t: 'thread', id: t.id, name: t.name, v: t.v, by: '' }).catch(() => {})
 }
 
 /** Leaving is its own message; the owner then signs a new member list without us. */
@@ -1805,7 +1883,7 @@ const THREAD_RE = /^[A-Za-z0-9_-]{16}\.[0-9a-f-]{36}$/
 /** The thread a message says it's in. One we haven't heard of yet (we joined later) gets a placeholder. */
 function threadOf(chat: string, th: unknown): string | undefined {
   if (typeof th !== 'string' || !THREAD_RE.test(th)) return
-  // ponytail: people who join a group later only learn a thread's name if it's renamed; send thread state to new members if that matters.
+  // Placeholder until its name arrives (the owner sends existing threads to new members; see updateGroup).
   if (!state.chats[chat]?.threads?.[th]) setChat(chat, (c) => ({ ...c, threads: { ...c.threads, [th]: { id: th, name: 'Thread', by: '', ts: Date.now(), v: 0 } } }))
   return th
 }
@@ -1815,13 +1893,19 @@ function onThread(chat: string, from: string, p: Extract<Payload, { t: 'thread' 
   if (!c || !THREAD_RE.test(id)) return
   const cur = c.threads?.[id]
   const fresh = !cur || !cur.v
-  // Started by whoever's id it carries; renamed by them or the group's owner.
-  if (fresh ? !id.startsWith(`${from.slice(0, 16)}.`) : from !== cur.by && from !== c.group?.owner) return
+  // The owner catching us up on a thread from before we joined. We can't check who really started it
+  // (the owner could claim anyone), so it isn't credited to anyone: `by` stays unknown ('').
+  const sync = fresh && typeof p.by === 'string' && from === c.group?.owner
+  const prefixOf = (who: string) => id.startsWith(`${who.slice(0, 16)}.`)
+  // Started by whoever's id it carries; renamed by them (for a thread we were caught up on: whoever's id
+  // prefix it has) or the group's owner.
+  if (fresh ? !sync && !prefixOf(from) : from !== c.group?.owner && (cur.by ? from !== cur.by : !prefixOf(from))) return
   const v = num(p.v, 1, 1e15)
   if (cur && v <= cur.v) return
   const root = typeof p.root === 'string' && c.messages.some((x) => x.id === p.root) ? p.root : cur?.root
-  const t: Thread = { id, name: str(p.name, 100).trim() || 'Thread', root, by: fresh ? from : cur.by, ts: cur?.ts ?? ts, v }
-  setChat(chat, (c) => ({ ...c, threads: { ...c.threads, [id]: t }, messages: fresh && !root ? [...c.messages, sysMsg({ k: 'thread', by: from, name: t.name, th: id }, ts)] : c.messages }))
+  const t: Thread = { id, name: str(p.name, 100).trim() || 'Thread', root, by: fresh ? (sync ? '' : from) : cur.by, ts: cur?.ts ?? ts, v }
+  // A thread we're only being caught up on is in the Threads list, not announced in the chat as new.
+  setChat(chat, (c) => ({ ...c, threads: { ...c.threads, [id]: t }, messages: fresh && !root && !sync ? [...c.messages, sysMsg({ k: 'thread', by: from, name: t.name, th: id }, ts)] : c.messages }))
   if (from !== state.me?.id) bot?.thread?.(chat, t, from, fresh)
 }
 /** Start a thread, from a message or on its own. Resolves with its id. */
@@ -1845,7 +1929,7 @@ export async function renameThread(chat: string, id: string, name: string) {
 export const openThread = (id: string | null) => set({ thread: id })
 
 /** Forms we asked someone to fill in, so only those can come back (key: who:form id). */
-const forms = new Map<string, { msg: string; until: number }>()
+const forms = new Map<string, { msg: string; until: number; form: Form }>()
 
 /** A tap on one of our messages. Only on buttons we really sent, or forms we asked for: nobody can invent callback data. */
 function onTap(chat: string, from: string, p: Extract<Payload, { t: 'btn' }>) {
@@ -1862,8 +1946,19 @@ function onTap(chat: string, from: string, p: Extract<Payload, { t: 'btn' }>) {
     if (v.length < (sel.min ?? 1) || v.length > (sel.max ?? 1)) return
     e.values = v
   } else if (form && form.msg === m.id && form.until > Date.now()) {
+    // Exactly the fields we asked for, within their rules (a modified client can send anything), and only once.
     if (!p.f || typeof p.f !== 'object') return
-    e.fields = Object.fromEntries(Object.entries(p.f).slice(0, 5).map(([k, v]) => [str(k, 100), str(v, 4000)]))
+    const got = p.f as Record<string, unknown>
+    if (Object.keys(got).some((k) => !form.form.f.some((f) => f.id === k))) return
+    const fields: Record<string, string> = {}
+    for (const f of form.form.f) {
+      const v = typeof got[f.id] === 'string' ? (got[f.id] as string) : ''
+      const n = v.trim().length
+      if ((f.req && !n) || (n && f.min && v.length < f.min) || v.length > (f.max ?? 4000)) return
+      fields[f.id] = v
+    }
+    forms.delete(`${from}:${d}`)
+    e.fields = fields
   } else if (!rows.some((r) => Array.isArray(r) && r.some((b) => b.d === d))) return
   bot?.button?.(e)
 }
@@ -1907,8 +2002,9 @@ export function suggest(chat: string, botId: string, cmd: string, opt: string, v
 }
 /** Bots: answer a tap with a note, an alert, or a form to fill in (on message `msg`). */
 export function answerTap(chat: string, to: string, q: string, a: { text?: string; alert?: boolean; form?: Form; msg?: string }) {
-  if (a.form && a.msg) forms.set(`${to}:${a.form.id}`, { msg: a.msg, until: Date.now() + 15 * 60_000 })
-  return deliverTo(chat, to, { t: 'btnack', q, text: a.text, alert: a.alert ? 1 : undefined, form: a.form })
+  const form = a.form && readForm(a.form)
+  if (form && a.msg) forms.set(`${to}:${form.id}`, { msg: a.msg, until: Date.now() + 15 * 60_000, form })
+  return deliverTo(chat, to, { t: 'btnack', q, text: a.text, alert: a.alert ? 1 : undefined, form })
 }
 /** Bots: answer an autocomplete request. */
 export const answerSuggest = (chat: string, to: string, q: string, o: { l: string; v: string }[]) => deliverTo(chat, to, { t: 'autoans', q, o: o.slice(0, 25) })
