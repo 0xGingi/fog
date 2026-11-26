@@ -124,9 +124,17 @@ class FogPlugin(private val activity: Activity) : Plugin(activity) {
     }
 }
 
-/** Receives this install's push token from Firebase (and any later replacement). */
+/**
+ * Receives this install's push token from Firebase (and any later replacement). Depending on the
+ * phone's Google Play services version, register() reports it through onRegistered (newer) or
+ * onNewToken (older), so both are handled; missing one left most Android installs without push.
+ */
 class FogMessagingService : FirebaseMessagingService() {
-    override fun onRegistered(token: String) {
+    override fun onRegistered(token: String) = save(token)
+
+    override fun onNewToken(token: String) = save(token)
+
+    private fun save(token: String) {
         Log.i("Fog", "push registration ready")
         getSharedPreferences("fog", Context.MODE_PRIVATE).edit().putString("push", token).apply()
         FogPlugin.answer { it.resolve(JSObject().apply { put("token", token) }) }

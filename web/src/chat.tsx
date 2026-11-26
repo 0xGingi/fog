@@ -1522,6 +1522,8 @@ function Composer(props: {
           {rec || canSend || editing ? (
             <button
               key="send"
+              // Keep the focus (and the phone's keyboard) in the message box when tapping Send.
+              onMouseDown={(e) => e.preventDefault()}
               onClick={rec ? stopRec : send}
               disabled={!rec && !canSend}
               aria-label={editing ? 'Save edit' : rec ? 'Send voice message' : 'Send'}

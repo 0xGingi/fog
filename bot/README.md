@@ -1,7 +1,7 @@
 # fog-bot
 
 Run a Fog account as a bot. `fog-bot` holds the account's keys, does all the end-to-end encryption with
-the Fog app's own engine, and gives your bot (Hermes, OpenClaw, or your own code) a plain HTTP API on
+the Fog app's own engine, and gives your bot (Hermes or your own code) a plain HTTP API on
 your machine.
 
 A bot is an ordinary Fog account. The server can't tell it's a bot, and like every Fog chat it never

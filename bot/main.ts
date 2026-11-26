@@ -8,7 +8,7 @@ import { homedir } from 'node:os'
 // The crypto core, embedded in the binary by `bun build --compile`.
 import wasmPath from '../web/src/core/fog_core_bg.wasm' with { type: 'file' }
 
-const VERSION = '0.4.1'
+const VERSION = '0.4.2'
 const USAGE = `fog-bot ${VERSION}: run a Fog account as a bot, with a local HTTP API.
 
   fog-bot init [--server URL] [--username NAME] [--name "Display name"] [--owner @you] [--restore]

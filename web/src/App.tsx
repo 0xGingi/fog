@@ -583,11 +583,71 @@ function useBackButton() {
   }, [])
 }
 
+/**
+ * Phones: swipe right from the left edge of a chat to go back to the chat list, the chat following
+ * the finger with the list showing underneath (iOS has no Back gesture of its own in the app).
+ */
+function useSwipeBack(main: React.RefObject<HTMLElement | null>, active: string | null, setPeek: (on: boolean) => void) {
+  useEffect(() => {
+    const el = main.current
+    if (!el || !active || !matchMedia('(max-width: 767px)').matches) return
+    let x0 = 0, y0 = 0, dx = 0, vx = 0, last = 0
+    let on: boolean | null = false // null: deciding, true: swiping
+    const start = (e: TouchEvent) => {
+      const t = e.touches[0]
+      const edge = e.touches.length === 1 && t.clientX < 28 && !document.querySelector('[role=menu],[role=dialog],[data-drawer]')
+      on = edge ? null : false
+      x0 = t.clientX; y0 = t.clientY; dx = 0; vx = 0; last = e.timeStamp
+    }
+    const move = (e: TouchEvent) => {
+      if (on === false) return
+      const t = e.touches[0]
+      const x = Math.max(0, t.clientX - x0)
+      if (on === null) {
+        if (x < 10 && Math.abs(t.clientY - y0) < 10) return
+        on = x > Math.abs(t.clientY - y0)
+        if (!on) return
+        setPeek(true)
+        el.style.transition = 'none'
+      }
+      e.preventDefault()
+      vx = (x - dx) / Math.max(1, e.timeStamp - last)
+      dx = x; last = e.timeStamp
+      el.style.transform = `translateX(${dx}px)`
+    }
+    const end = () => {
+      if (!on) return void (on = false)
+      on = false
+      const back = dx > el.offsetWidth / 3 || (vx > 0.4 && dx > 40)
+      el.style.transition = 'transform 180ms ease-out'
+      el.style.transform = `translateX(${back ? el.offsetWidth : 0}px)`
+      setTimeout(() => {
+        el.style.transition = el.style.transform = ''
+        if (back) fog.openChat(null)
+        setPeek(false)
+      }, 180)
+    }
+    el.addEventListener('touchstart', start, { passive: true })
+    el.addEventListener('touchmove', move, { passive: false })
+    el.addEventListener('touchend', end)
+    el.addEventListener('touchcancel', end)
+    return () => {
+      el.removeEventListener('touchstart', start)
+      el.removeEventListener('touchmove', move)
+      el.removeEventListener('touchend', end)
+      el.removeEventListener('touchcancel', end)
+    }
+  }, [active])
+}
+
 function Main() {
   const active = useFog((s) => s.active)
   const lockPrompted = useFog((s) => s.settings.lockPrompted)
   const [protect, setProtect] = useState<'ask' | 'set' | null>(null)
   useBackButton()
+  const mainEl = useRef<HTMLElement>(null)
+  const [peek, setPeek] = useState(false)
+  useSwipeBack(mainEl, active, setPeek)
   useEffect(() => {
     if (!lockPrompted) db.lockEnabled().then((on) => (on ? fog.updateSettings({ lockPrompted: true }) : setProtect('ask')))
   }, [])
@@ -623,11 +683,11 @@ function Main() {
   }, [])
   useEffect(() => setInfo(false), [active])
   return (
-    <div className="flex h-full overflow-hidden bg-panel pt-[env(safe-area-inset-top)]">
+    <div className="relative flex h-full overflow-hidden bg-panel pt-[env(safe-area-inset-top)]">
       <aside
         ref={aside}
         style={{ '--sb': `${rail ? RAIL : (dragW ?? width)}px` } as React.CSSProperties}
-        className={`relative flex w-full shrink-0 flex-col overflow-hidden border-line md:w-[var(--sb)] md:border-r ${dragW === null || dragW === RAIL || dragW === SB_MIN ? 'md:transition-[width] md:duration-150' : ''} ${active ? 'max-md:hidden' : ''}`}
+        className={`relative flex w-full shrink-0 flex-col overflow-hidden border-line md:w-[var(--sb)] md:border-r ${dragW === null || dragW === RAIL || dragW === SB_MIN ? 'md:transition-[width] md:duration-150' : ''} ${active && !peek ? 'max-md:hidden' : ''}`}
       >
         <Sidebar
           compact={rail}
@@ -645,7 +705,10 @@ function Main() {
         {panel === 'archived' && <Archived onClose={() => setPanel('none')} />}
         {panel === 'requests' && <Archived requests onClose={() => setPanel('none')} />}
       </aside>
-      <main className={`min-w-0 flex-1 ${active ? '' : 'max-md:hidden'}`}>
+      <main
+        ref={mainEl}
+        className={`min-w-0 flex-1 ${active ? '' : 'max-md:hidden'} ${peek ? 'absolute inset-x-0 top-[env(safe-area-inset-top)] bottom-0 z-10 bg-panel shadow-[-8px_0_24px_rgba(0,0,0,.25)]' : ''}`}
+      >
         {active ? <ChatPane key={active} id={active} onInfo={() => setInfo((v) => !v)} /> : <EmptyPane />}
       </main>
       {active && info && <ChatInfo key={active} id={active} onClose={() => setInfo(false)} />}

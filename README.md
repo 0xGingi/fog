@@ -300,9 +300,7 @@ Deliberate architectural shortcuts are marked `ponytail:` in the source code so 
 *Not planned: GIF search from a catalog. Tenor's API is gone, and GIPHY and KLIPY require each device to contact them directly (no proxy), which would hand users' IPs and searches to an ad/tracking company. Fog has saved GIFs instead.*
 
 **Agents & bots**
-- Threads in groups (so an agent can keep one conversation per topic, like Discord threads)
 - Bots in group voice calls (listen and speak)
-- An OpenClaw channel plugin over the same API
 
 ## License
 
