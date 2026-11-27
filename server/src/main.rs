@@ -393,6 +393,36 @@ fn remove_device(app: &App, db: &Connection, account: &str, device: u32) -> Resu
     Ok(())
 }
 
+/// Delete an account: linked devices are cut off at once, then the account row (freeing its
+/// username), the calling device's rows, its backup and the reports it filed go. Reports others
+/// filed about it stay. The calling device's connection is left to the app, which wipes itself.
+fn delete_account(app: &App, db: &Connection, account: &str, here: u32) -> Result<(), String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    let devices: Vec<u32> = {
+        let mut st = db.prepare("SELECT id FROM devices WHERE account=?").map_err(e)?;
+        st.query_map([account], |r| r.get(0)).and_then(|rows| rows.collect()).map_err(e)?
+    };
+    for d in devices.into_iter().filter(|d| *d != here) {
+        remove_device(app, db, account, d)?;
+    }
+    let backup: Option<String> = db.query_row("SELECT backup FROM accounts WHERE id=?", [account], |r| r.get(0)).map_err(e)?;
+    for sql in [
+        "DELETE FROM devices WHERE account=?",
+        "DELETE FROM prekeys WHERE account=?",
+        "DELETE FROM kyber_prekeys WHERE account=?",
+        "DELETE FROM messages WHERE recipient=?",
+        "DELETE FROM push_tokens WHERE account=?",
+        "DELETE FROM reports WHERE reporter=?",
+        "DELETE FROM accounts WHERE id=?",
+    ] {
+        db.execute(sql, [account]).map_err(e)?;
+    }
+    if let Some(b) = backup.filter(|b| blob_id_ok(b)) {
+        let _ = std::fs::remove_file(app.blobs.join(b));
+    }
+    Ok(())
+}
+
 /// Device-management calls need the main-device key on record (older accounts get it at first login).
 fn has_main_key(db: &Connection, account: &str) -> bool {
     db.query_row("SELECT main IS NOT NULL FROM accounts WHERE id=?", [account], |r| r.get(0)).unwrap_or(false)
@@ -1351,6 +1381,8 @@ enum Req {
         #[serde(default)]
         id: Option<String>,
     },
+    /// Main device: delete the account and everything the server holds for it (Play requires this).
+    DeleteAccount,
 }
 
 #[derive(Deserialize)]
@@ -1392,6 +1424,7 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
         Req::Push { .. } => ("push", 0.2, 10.0),
         Req::Away { .. } => ("away", 1.0, 60.0),
         Req::Backup { .. } => ("backup", 0.01, 10.0),
+        Req::DeleteAccount => ("link", 0.05, 10.0),
     };
     if !app.limits.allow(&format!("{bucket}:{me}"), rate, burst) {
         return json!({"rid": rpc.rid, "error": "slow_down"});
@@ -1636,6 +1669,13 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
             let token = B64URL.encode(rand::random::<[u8; 24]>());
             app.links.lock().unwrap().insert(me.to_owned(), Link { device, token: token.clone(), expires: Instant::now() + Duration::from_secs(600) });
             Ok(json!({"device": device, "token": token}))
+        }
+        Req::DeleteAccount => {
+            if cx.device != MAIN_DEVICE || !has_main_key(db, me) {
+                return Err("main_only".into());
+            }
+            delete_account(app, db, me, cx.device)?;
+            Ok(json!({}))
         }
         Req::Unlink { device } => {
             if device == MAIN_DEVICE || (cx.device != MAIN_DEVICE && device != cx.device) || (cx.device == MAIN_DEVICE && !has_main_key(db, me)) {
@@ -2198,7 +2238,8 @@ mod tests {
              CREATE TABLE kyber_prekeys(account TEXT NOT NULL, id INTEGER NOT NULL, key TEXT NOT NULL, sig TEXT NOT NULL, PRIMARY KEY(account, id));
              CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, ts INTEGER NOT NULL);
              CREATE TABLE devices(account TEXT NOT NULL, id INTEGER NOT NULL, keys TEXT, name TEXT, created INTEGER NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(account, id));
-             CREATE TABLE push_tokens(account TEXT NOT NULL, device INTEGER NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(account, device));",
+             CREATE TABLE push_tokens(account TEXT NOT NULL, device INTEGER NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(account, device));
+             CREATE TABLE reports(reporter TEXT NOT NULL, reported TEXT NOT NULL, ts INTEGER NOT NULL);",
         )
         .unwrap();
         migrate_devices(&db);
@@ -2264,6 +2305,39 @@ mod tests {
         assert_eq!(left, vec!["kept".to_string()]);
         assert_eq!(db.query_row("SELECT count(*) FROM push_tokens", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         assert!(!end1.is_cancelled());
+    }
+
+    #[test]
+    fn deleting_an_account_leaves_nothing_of_it() {
+        let app = Arc::new(test_app());
+        let bk = format!("{:032x}", rand::random::<u128>());
+        std::fs::write(app.blobs.join(&bk), b"x").unwrap();
+        {
+            let db = app.db.lock().unwrap();
+            db.execute_batch(&format!(
+                "INSERT INTO accounts(id, keys, created, main, next_device, username, backup) VALUES('alice', '{{}}', 0, 'mainkey', 3, 'alice', '{bk}'), ('bob', '{{}}', 0, 'k', 2, 'bob', NULL);
+                 INSERT INTO devices(account, id, keys, created, seen) VALUES('alice', 1, '{{}}', 0, 0), ('bob', 1, '{{}}', 0, 0);
+                 INSERT INTO devices(account, id, keys, created, seen, key) VALUES('alice', 2, '{{}}', 0, 0, 'dkey');
+                 INSERT INTO messages(recipient, device, sender, sender_device, body, ts) VALUES('alice', 1, 'bob', 1, 'a', 0), ('alice', 2, 'bob', 1, 'b', 0), ('bob', 1, '', 0, 'kept', 0);
+                 INSERT INTO push_tokens VALUES('alice', 1, 'fcm', 't1'), ('alice', 2, 'fcm', 't2'), ('bob', 1, 'fcm', 't3');
+                 INSERT INTO reports VALUES('alice', 'bob', 0), ('bob', 'alice', 0);"
+            ))
+            .unwrap();
+        }
+        let (_tx, _rx, linked) = go_online(&app, "alice.2");
+        let (_tx1, _rx1, here) = go_online(&app, "alice.1");
+        delete_account(&app, &app.db.lock().unwrap(), "alice", 1).unwrap();
+        assert!(linked.is_cancelled(), "linked devices are cut off");
+        assert!(!here.is_cancelled(), "the calling device gets its reply");
+        assert!(!app.blobs.join(&bk).exists(), "the backup goes");
+        let db = app.db.lock().unwrap();
+        let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(count("SELECT count(*) FROM accounts"), 1);
+        assert_eq!(count("SELECT count(*) FROM devices WHERE account='alice'"), 0);
+        assert_eq!(count("SELECT count(*) FROM messages"), 1);
+        assert_eq!(count("SELECT count(*) FROM push_tokens"), 1);
+        assert_eq!(count("SELECT count(*) FROM reports WHERE reporter='alice'"), 0);
+        assert_eq!(count("SELECT count(*) FROM reports WHERE reported='alice'"), 1, "reports others filed stay");
     }
 
     #[test]

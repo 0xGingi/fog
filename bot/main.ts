@@ -8,7 +8,9 @@ import { homedir } from 'node:os'
 // The crypto core, embedded in the binary by `bun build --compile`.
 import wasmPath from '../web/src/core/fog_core_bg.wasm' with { type: 'file' }
 
-const VERSION = '0.5.0'
+import { hostedService, TERMS_VERSION } from '../web/src/hostedTerms'
+
+const VERSION = '0.5.1'
 const USAGE = `fog-bot ${VERSION}: run a Fog account as a bot, with a local HTTP API.
 
   fog-bot init [--server URL] [--username NAME] [--name "Display name"] [--owner @you] [--restore]
@@ -27,6 +29,7 @@ const USAGE = `fog-bot ${VERSION}: run a Fog account as a bot, with a local HTTP
   fog-bot info
       The bot's account id, username and invite link.
 
+  --accept-terms DATE   confirm you are 18+ and agree to https://getfog.org/terms/ (current: ${TERMS_VERSION}).
   --dir DIR   where the bot keeps its keys and messages (default: $FOG_BOT_DIR or ~/.fog-bot)
 `
 
@@ -138,7 +141,7 @@ if (cmd === 'allow' && runningPid) {
 process.env.FOG_SERVER = config.server
 await import('./shim')
 const { openStore } = await import('./store')
-const { useStore } = await import('../web/src/db')
+const { useStore, kv } = await import('../web/src/db')
 const store = openStore(dir)
 useStore(store)
 // One process per account: two would advance the same encryption ratchets and break them.
@@ -164,6 +167,10 @@ const fog = await import('../web/src/fog')
 const media = await import('../web/src/media')
 // Before anything connects (every command goes online): nothing is sent to anyone off the allowlist.
 fog.setBotHooks({ reach: (peer) => allowed(peer) })
+if (hostedService(new URL(config.server)) && await kv('hostedTerms') !== TERMS_VERSION) {
+  if (flag('accept-terms') !== TERMS_VERSION) fail(`The hosted Fog service is for adults 18 and older. Read https://getfog.org/terms/ and https://getfog.org/privacy/. If you are eligible and agree, run this command again with --accept-terms ${TERMS_VERSION}.`)
+  await kv('hostedTerms', TERMS_VERSION)
+}
 await fog.boot()
 
 // ---------- who the bot talks to ----------
@@ -639,6 +646,10 @@ fog.setBotHooks({
   reaction(chat, id, from, emoji) {
     if (!shown(chat, from)) return
     emit({ type: 'reaction', chat: chatInfo(chat), message_id: id, from: user(from), emoji, ...threadAt(chat, id) })
+  },
+  read(chat, ids, from) {
+    if (!shown(chat, from)) return
+    emit({ type: 'read', chat: chatInfo(chat), message_ids: ids, from: user(from) })
   },
   button(e) {
     if (!shown(e.chat, e.from)) return

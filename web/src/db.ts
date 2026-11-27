@@ -119,10 +119,11 @@ export async function kvClear() {
     localStorage.clear()
   } catch {}
   const db = await idb()
-  await new Promise((res) => {
+  await new Promise<void>((resolve, reject) => {
     const tx = db.transaction('kv', 'readwrite')
     tx.objectStore('kv').clear()
-    tx.oncomplete = res
+    tx.oncomplete = () => resolve()
+    tx.onerror = tx.onabort = () => reject(new StorageError(String(tx.error)))
   })
 }
 

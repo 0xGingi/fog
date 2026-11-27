@@ -201,10 +201,10 @@
             <ul class="mt-5 space-y-3.5 leading-relaxed text-muted">
               <li>What you write, send or say on a call</li>
               <li>Your photos, videos, files and voice messages</li>
-              <li>Who sent a message, once you're contacts</li>
+              <li>The sender’s account ID on sealed-sender messages</li>
               <li>Which groups you're in, or who's in them</li>
               <li>Your name and profile photo</li>
-              <li>Your phone number or email, because we never ask</li>
+              <li>Your phone number or email from signup</li>
             </ul>
           </div>
           <div class="rounded-3xl border border-line bg-raised p-7 sm:p-9">
@@ -212,7 +212,7 @@
             <ul class="mt-5 space-y-3.5 leading-relaxed text-muted">
               <li>Your IP address when you connect. Use a VPN or Tor if that matters to you.</li>
               <li>The username you choose, if you choose one</li>
-              <li>Who sends a first message to a stranger, before it's accepted</li>
+              <li>The sender’s account and device IDs on ordinary deliveries, including first contacts</li>
               <li>When you're connected, and roughly how much you send</li>
             </ul>
           </div>
@@ -382,6 +382,7 @@ bun web/verify.ts https://getfog.org ./my-build
       <div class="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-8 text-sm text-muted sm:px-6">
         <span class="flex items-center gap-2"><img src="/icon.svg" alt="" class="size-5" /> Fog. Open source under the AGPL-3.0, <a href="https://github.com/0xGingi/fog" rel="noopener" class="underline decoration-line underline-offset-4 hover:text-ink">on GitHub</a>.</span>
         <span>No cookies, no analytics, no trackers on this page.</span>
+        <nav class="flex gap-4" aria-label="Legal"><a href="/privacy/" class="hover:text-ink">Privacy</a><a href="/terms/" class="hover:text-ink">Terms</a><a href="/delete/" class="hover:text-ink">Delete account</a></nav>
       </div>
     </footer>
   </body>

@@ -27,7 +27,7 @@ export default defineConfig(({ mode }) => {
     // getfog.org/ is the landing page and the app lives at /app/. The desktop app only needs the app.
     build: desktop
       ? { outDir: 'dist-desktop', rollupOptions: { input: { app: 'app/index.html' } } }
-      : { rollupOptions: { input: { landing: 'index.html', app: 'app/index.html' } } },
+      : { rollupOptions: { input: { landing: 'index.html', app: 'app/index.html', delete: 'delete/index.html', privacy: 'privacy/index.html', terms: 'terms/index.html' } } },
     server: { proxy: { '/ws': { target: 'ws://127.0.0.1:8787', ws: true }, '/blob': 'http://127.0.0.1:8787', '/sealed': 'http://127.0.0.1:8787' } },
   }
 })

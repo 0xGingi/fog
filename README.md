@@ -37,6 +37,7 @@ Fog is a self-hostable, end-to-end encrypted messenger built on Signal's Rust `l
 - **Private groups:** Up to 50 members over pairwise Signal sessions with signed group state and fork detection.
 - **Encrypted profiles & privacy controls:** Display name and avatar are shared end-to-end encrypted only with people you message. Includes Message Requests for strangers, silent blocking, safety number verification (numbers + QR scan), and an optional App Lock (passcode and/or passkey).
 - **Bots and AI agents:** Run any Fog account as a bot with [`fog-bot`](bot/README.md), which keeps the keys on your machine and gives your bot a local HTTP API (there's also a [skill](bot/skill/fog-bot/SKILL.md) that teaches AI agents to build on it). Bots get a badge, a `/` command menu (with choices and live suggestions), buttons, dropdowns, forms, cards, Markdown (tables, code, lists), replies that stream in as they're written, and messages only one group member sees. [Hermes Agent](https://github.com/NousResearch/hermes-agent) connects with the [hermes-fog](https://github.com/0xGingi/hermes-fog) plugin. The server can't tell a bot from a person.
+- **Telegram bridge:** [`fog-telegram`](telegram/README.md) brings your Telegram chats into Fog through a fog-bot you run, so the Fog server sees nothing new. Each Telegram chat becomes a Fog chat, both ways: formatted text, media, replies, edits, deletes, reactions and read receipts, with recent history copied in. Telegram still keeps those chats on its servers, and every bridged chat says so.
 - **Installable web app:** Progressive Web App (PWA) with light/dark themes, adjustable text size, notification sounds, keyboard and screen-reader accessibility, long-press touch menus, and paged rendering for long histories.
 
 ## Security Model
@@ -157,6 +158,7 @@ With Docker Compose, put the key files in `./push/` next to `compose.yaml` (it's
 │             Handles WebSocket auth, prekey bundles, sealed delivery, encrypted blobs,
 │             SSRF-hardened link previews, built-in dev STUN, and serving the web bundle.
 ├── bot/      fog-bot: runs an account as a bot with the client engine (Bun) and a local HTTP API.
+├── telegram/ fog-telegram: bridges your Telegram account into Fog through a fog-bot (Bun + mtcute).
 ├── web/      React 19 + TypeScript + Vite + Tailwind CSS 4 client (managed with Bun).
 │             index.html is the getfog.org landing page; app/index.html is the app.
 │             src-tauri/ holds the desktop shell.

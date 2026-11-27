@@ -5,6 +5,8 @@ import init, { Account, link_agree, link_keypair, new_mnemonic, solve_pow, valid
 import { isUnlocked, kv, kvClear, lockEnabled, StorageError } from './db'
 import { chime, dropLocal, MAX_FILE, SERVER, prepare, prepareSticker, upload, download, type Att, type Kind } from './media'
 
+import { hostedService, TERMS_VERSION } from './hostedTerms'
+
 export { new_mnemonic as newPhrase, valid_mnemonic as validPhrase }
 
 export type Status = 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
@@ -113,7 +115,8 @@ export type Person = { username?: string | null; name?: string; avatar?: string;
 export type Profile = { name: string; avatar?: string; v: number; bot?: BotInfo }
 export type Settings = { readReceipts: boolean; typing: boolean; sounds: boolean; theme: 'system' | 'light' | 'dark'; textSize: number; linkPreviews: boolean; relayCalls: boolean; autoLock: number; lockPrompted?: boolean; /** Encrypted chat backup to the server (main device; on unless turned off). */ backup?: boolean; /** Desktop app: native notifications. */ notifications?: boolean; /** Show the sender and text in notifications (off: just "New message"). */ previews?: boolean; /** Desktop layout: chat list width, or folded to an avatar rail. */ sidebar?: number; sidebarCollapsed?: boolean }
 export type State = {
-  phase: 'loading' | 'locked' | 'unlock' | 'welcome' | 'username' | 'app'
+  localDeletionFailed?: boolean
+  phase: 'loading' | 'locked' | 'unlock' | 'terms' | 'delete' | 'deleted' | 'welcome' | 'username' | 'app'
   /** `device` is this device's id; `main` means it holds the recovery phrase (device 1). */
   me: { id: string; username: string | null; device: number; main: boolean } | null
   profile: Profile
@@ -409,6 +412,17 @@ applyTheme()
 // ---------- boot ----------
 type Meta = { username: string | null; skipped?: boolean; settings?: Partial<Settings>; profile?: Profile; blocked?: string[]; ak?: string; akAt?: number; trust?: string }
 
+let acceptedThisBoot = false
+export async function acceptTerms() {
+  await kv('hostedTerms', TERMS_VERSION)
+  acceptedThisBoot = true
+  if (state.phase === 'terms') set({ phase: 'loading' })
+}
+
+export function openAccountDeletion() {
+  set({ phase: 'delete' })
+}
+
 export async function boot() {
   // One tab owns the keys. Two tabs advancing the same ratchet would corrupt sessions.
   // On reload the old page may still hold the lock for a moment, so wait instead of failing;
@@ -440,6 +454,15 @@ export async function boot() {
     akAt = meta?.akAt ?? 0
     pinnedTrust = meta?.trust ?? null
     set({ me: { id: acct.id, username: meta?.username ?? null, device: acct.device, main: acct.is_main }, profile: meta?.profile ?? state.profile })
+  }
+  // Deletion stays available to people who decline the terms, even after uninstalling.
+  if (!bot && new URLSearchParams(location.search).has('delete')) return openAccountDeletion()
+  if (!bot && hostedService(SERVER) && (!saved || await kv('hostedTerms') !== TERMS_VERSION)) {
+    set({ phase: 'terms' })
+    await waitFor(() => acceptedThisBoot || state.phase === 'delete')
+    if (state.phase === 'delete') return
+  }
+  if (saved) {
     // Connect while the chats load: the network round trips (TLS, sign-in) overlap reading the
     // database, and whatever the server sends waits for `loaded` (see onPush).
     connect()
@@ -545,6 +568,62 @@ export async function logout() {
   await kvClear()
   location.reload()
 }
+/** A fresh browser can prove ownership without registering a new account or restoring chat history. */
+export async function deleteFromBrowser(phrase: string) {
+  const localAccount = acct
+  const owner = localAccount?.is_main ? localAccount : Account.create(phrase, Date.now())
+  try {
+    if (localAccount && owner.id !== localAccount.id) throw new Error("These words belong to a different account.")
+    await new Promise<void>((resolve, reject) => {
+      const socket = new WebSocket(`${wsBase()}/ws`)
+      const finish = (error?: string) => {
+        clearTimeout(timeout)
+        socket.onmessage = socket.onclose = socket.onerror = null
+        socket.close()
+        if (error) reject(new Error(error))
+        else resolve()
+      }
+      const interrupted = () => finish("Couldn't confirm deletion. Check your connection and try again.")
+      const timeout = window.setTimeout(interrupted, 60_000)
+      socket.onerror = socket.onclose = interrupted
+      socket.onmessage = ({ data }) => {
+        try {
+          const m = JSON.parse(data)
+          if (m.t === 'challenge') socket.send(JSON.stringify(loginProof(owner, m.nonce)))
+          else if (m.t === 'ready') {
+            if (!m.registered) return finish("There is no active account for this key on this server.")
+            socket.send(JSON.stringify({ t: 'delete_account', rid: 1 }))
+          } else if (m.error) finish("The server could not authorize or complete deletion.")
+          else if (m.rid === 1) finish()
+        } catch { interrupted() }
+      }
+    })
+    await finishDeletion()
+  } finally {
+    if (owner !== localAccount) owner.free()
+  }
+}
+
+/** A failed local wipe cannot undo a confirmed server deletion. */
+async function finishDeletion() {
+  const hadLocalAccount = !!acct
+  acct?.free()
+  acct = null
+  let localDeletionFailed = false
+  if (hadLocalAccount) {
+    try { await kvClear() }
+    catch { localDeletionFailed = true }
+  }
+  set({ phase: 'deleted', me: null, localDeletionFailed })
+}
+/** Main device: delete the account from the server, then erase this device like logging out. */
+export async function deleteAccount() {
+  await rpc({ t: 'delete_account' })
+  unlinkedNow = true
+  ws?.close()
+  await finishDeletion()
+  if (!state.localDeletionFailed) location.reload()
+}
 export const loadDevices = () => refreshDevices()
 
 /** The lock screen calls this after db.unlockWith…() succeeds; boot() then carries on. */
@@ -558,7 +637,7 @@ for (const e of ['pointerdown', 'keydown', 'wheel', 'touchstart']) addEventListe
 setInterval(async () => {
   const mins = state.settings.autoLock
   const inCall = !!document.querySelector('[role=dialog][aria-label^="Call with"]')
-  if (state.phase === 'app' && mins > 0 && !inCall && Date.now() - lastActive > mins * 60_000 && (await lockEnabled())) lockNow()
+  if (acct && ['app', 'terms', 'delete'].includes(state.phase) && mins > 0 && !inCall && Date.now() - lastActive > mins * 60_000 && (await lockEnabled())) lockNow()
 }, 15_000)
 
 export const phrase = () => acct?.phrase ?? ''
@@ -620,7 +699,7 @@ function connect() {
  * returns, ask the server something small; no answer within 5 s means reconnect now.
  */
 async function checkAlive(resumed = false) {
-  if (!acct || unlinkedNow) return
+  if (!acct || unlinkedNow || !['welcome', 'username', 'app'].includes(state.phase)) return
   if (state.conn === 'offline') {
     backoff = 500 // back from the background or offline: reconnect now, not after the backoff
     return connect()
@@ -669,18 +748,23 @@ function ack(id: number) {
   rpc({ t: 'ack', id }).catch(() => unacked.add(id))
 }
 
+function loginProof(account: Account, nonce: string) {
+  const challenge = te.encode(`fog-auth-v1|${SERVER.host}|${nonce}`)
+  const auth: Record<string, unknown> = { id: account.id, device: account.device, sig: b64(account.sign(challenge)) }
+  // The main device also proves the key derived from the recovery phrase; linked devices can't.
+  if (account.is_main) Object.assign(auth, { main: account.main_public(), msig: b64(account.main_sign(challenge)) })
+  // Linked devices sign with their own login key, so the shared identity key alone can't sign in as them.
+  else Object.assign(auth, { dkey: account.device_public(), dsig: b64(account.device_sign(challenge)) })
+  return auth
+}
+
 async function onPush(m: any) {
   // Signing in can start before the chats are loaded; everything after it waits for them (in order).
   if (m.t !== 'challenge') await loaded
   switch (m.t) {
     case 'challenge': {
       authNonce = m.nonce
-      const challenge = te.encode(`fog-auth-v1|${SERVER.host}|${m.nonce}`)
-      const auth: Record<string, unknown> = { id: acct!.id, device: acct!.device, sig: b64(acct!.sign(challenge)) }
-      // The main device also proves the key derived from the recovery phrase; linked devices can't.
-      if (acct!.is_main) Object.assign(auth, { main: acct!.main_public(), msig: b64(acct!.main_sign(challenge)) })
-      // Linked devices sign with their own login key, so the shared identity key alone can't sign in as them.
-      else Object.assign(auth, { dkey: acct!.device_public(), dsig: b64(acct!.device_sign(challenge)) })
+      const auth = loginProof(acct!, m.nonce)
       // A newly linked device's first login carries the approval token from the main device.
       if (linkToken) auth.token = linkToken
       auth.name = deviceName()
@@ -1987,6 +2071,8 @@ export type BotHooks = {
   edited?(chat: string, m: Msg, from: string): void
   deleted?(chat: string, id: string, from: string): void
   reaction?(chat: string, id: string, from: string, emoji: string | null): void
+  /** Someone read these messages of ours (only when their read receipts are on). */
+  read?(chat: string, ids: string[], from: string): void
   button?(e: Tap): void
   autocomplete?(e: { chat: string; from: string; q: string; cmd: string; opt: string; val: string; args: string }): void
   group?(chat: string): void
@@ -2424,6 +2510,10 @@ async function handlePayload(m: { id: number; ts: number }, from: string, dev: n
         return rank[s] > rank[x.status ?? 'sent'] ? { ...x, status: s } : x
       }),
     }))
+    if (s === 'read' && bot?.read) {
+      const read = state.chats[chat].messages.filter((x) => x.mine && ids.has(x.id)).map((x) => x.id)
+      if (read.length) bot.read(chat, read, from)
+    }
   } else if (p.t === 'typing' && known && !state.chats[chat].request) {
     setChat(chat, (c) => ({ ...c, typing: { by: from, until: Date.now() + 5000 } }))
     setTimeout(() => set({ chats: { ...state.chats } }), 5100)

@@ -1,6 +1,9 @@
 @import 'tailwindcss' source(none);
 @source '../index.html';
 @source './landing.ts';
+@source '../delete/index.html';
+@source '../privacy/index.html';
+@source '../terms/index.html';
 @import '@fontsource-variable/onest';
 
 /* Same palette as the app: cool mist greys, sodium-lamp amber; blue-slate night fog when dark. */

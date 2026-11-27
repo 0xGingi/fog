@@ -50,7 +50,18 @@ class FogPlugin(private val activity: Activity) : Plugin(activity) {
         // Pushes arrive while Fog is closed, so the channel (heads-up, with sound) must exist up front.
         activity.getSystemService(NotificationManager::class.java)
             .createNotificationChannel(NotificationChannel("messages", "Messages", NotificationManager.IMPORTANCE_HIGH))
-        checkForUpdate()
+        if (selfUpdates()) checkForUpdate()
+    }
+
+    /**
+     * Only the GitHub APK updates itself. The Google Play build (FOG_PLAY=1) has the install permission
+     * stripped from its manifest, since Play doesn't allow updates from anywhere else; that's the switch.
+     */
+    private fun selfUpdates() = try {
+        activity.packageManager.getPackageInfo(activity.packageName, PackageManager.GET_PERMISSIONS)
+            .requestedPermissions.orEmpty().contains(Manifest.permission.REQUEST_INSTALL_PACKAGES)
+    } catch (_: Exception) {
+        false
     }
 
     // Opening Fog clears its "New message" notifications.

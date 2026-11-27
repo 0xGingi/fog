@@ -10,6 +10,8 @@ profile, and only reach the people it talks to.
 
 ## Quick start
 
+On getfog.org, the adult running the bot must personally accept the current [Terms of Use](https://getfog.org/terms/). The CLI prints the dated flag to add to the command. Self-hosted servers set their own rules.
+
 ```sh
 fog-bot init --username my_agent --name "My Agent" --owner @you   # prints the recovery phrase and API token
 fog-bot run                                                         # API on http://127.0.0.1:8790
@@ -115,6 +117,7 @@ oldest are dropped. Chat history keeps the last 2,000 messages of each chat.
 | `edited` | `message`: Message (its new text) |
 | `deleted` | `chat`, `message_id`, `from` |
 | `reaction` | `chat`, `message_id`, `from`, `emoji` (`null`: removed) |
+| `read` | `chat`, `message_ids` (the bot's messages they read), `from`. Only from people whose read receipts are on |
 | `button` | `query_id`, `chat`, `message_id`, `from`, `data`, plus `values` (dropdown) or `fields` (form) |
 | `autocomplete` | `query_id`, `chat`, `from`, `command`, `option`, `value` (the word being typed), `args` (everything after the command) |
 | `chat` | `chat`: a group was created, changed, or someone left (only when what the API shows of it changed) |
@@ -162,7 +165,7 @@ Answers `{message}` (and `messages` when several files went out). If it couldn't
 is kept and resent when the bot reconnects, and you can still edit it by its id. Text is up to 65,536
 UTF-16 code units (JavaScript string length). `only_to` is ignored in DMs. Markdown covers headings, bold,
 italic, strikethrough, `||spoilers||`, inline code, fenced code with a language, lists (nested, numbered,
-`[ ]` tasks), quotes, tables and links (a link whose text isn't its address asks before opening).
+`[ ]` tasks), quotes, tables and links (a link whose text isn't its address asks before opening). A backslash shows the next character as itself (`\*`, `\_`, `\#`).
 
 ```jsonc
 // Row: a list of buttons…

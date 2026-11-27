@@ -203,7 +203,9 @@ jobs:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         if: env.GOOGLE_SERVICES_JSON != ''
         run: printf '%s' "$GOOGLE_SERVICES_JSON" > web/src-tauri/gen/android/app/google-services.json
-      - name: Build APK
+      # The APK goes on the GitHub release and updates itself from there. The .aab is what Google Play
+      # takes (uploaded by hand): built with FOG_PLAY=1, which drops the self-updater (Play forbids it).
+      - name: Build APK and App Bundle
         working-directory: web
         env:
           FOG_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.FOG_ANDROID_KEYSTORE_PASSWORD }}
@@ -211,10 +213,19 @@ jobs:
           bunx tauri android build --apk --target aarch64 --target armv7 --target x86_64
           apk=$(find src-tauri/gen/android/app/build/outputs/apk/universal/release -name '*.apk' | head -1)
           cp "$apk" "$GITHUB_WORKSPACE/Fog-Android.apk"
+          FOG_PLAY=1 bunx tauri android build --aab --target aarch64 --target armv7 --target x86_64
+          aab=$(find src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' | head -1)
+          cp "$aab" "$GITHUB_WORKSPACE/Fog-Android.aab"
+          # Guard: the Play bundle must not be able to install packages (Play rejects self-updaters).
+          if unzip -p "$GITHUB_WORKSPACE/Fog-Android.aab" base/manifest/AndroidManifest.xml | grep -q REQUEST_INSTALL_PACKAGES; then
+            echo "::error::Fog-Android.aab still has REQUEST_INSTALL_PACKAGES"; exit 1
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fog-android
-          path: Fog-Android.apk
+          path: |
+            Fog-Android.apk
+            Fog-Android.aab
       - name: Attach to the release
         if: github.ref_type == 'tag' && env.HAS_KEYSTORE == 'true'
         env:
@@ -245,11 +256,15 @@ jobs:
           bun-version: 1.4.5
       - run: bun install --frozen-lockfile
         working-directory: web
+      # fog-telegram (telegram/README.md) has its own dependencies.
+      - run: bun install --frozen-lockfile
+        working-directory: telegram
       - name: Build
         run: |
           for t in linux-x64 linux-arm64 darwin-arm64 darwin-x64 windows-x64; do
             ext=""; [ "$t" = windows-x64 ] && ext=".exe"
             bun build --compile --minify --target="bun-$t" bot/main.ts --outfile "dist/fog-bot-$t$ext"
+            bun build --compile --minify --target="bun-$t" telegram/main.ts --outfile "dist/fog-telegram-$t$ext"
           done
           ls -la dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

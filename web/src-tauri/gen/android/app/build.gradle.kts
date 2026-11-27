@@ -71,6 +71,8 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    // Google Play build (FOG_PLAY=1): no self-updating from GitHub, which Play doesn't allow.
+    if (System.getenv("FOG_PLAY") != null) sourceSets.getByName("release").manifest.srcFile("src/play/AndroidManifest.xml")
 }
 
 kotlin {

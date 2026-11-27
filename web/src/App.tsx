@@ -5,7 +5,7 @@ import { ChatPane } from './chat'
 import { CallScreen } from './callscreen'
 import { renderSVG } from 'uqr'
 import { fmtTime, snippet, Ticks } from './bubble'
-import { avatarFrom, download, useLocalUrl } from './media'
+import { avatarFrom, download, SERVER, useLocalUrl } from './media'
 import * as db from './db'
 import { BotDialogs } from './botui'
 import { LinkCheck } from './markdown'
@@ -29,6 +29,10 @@ export function App() {
         <Locked />
       ) : phase === 'unlock' ? (
         <LockScreen />
+      ) : phase === 'terms' ? (
+        <HostedTerms />
+      ) : phase === 'delete' || phase === 'deleted' ? (
+        <DeleteOnline done={phase === 'deleted'} />
       ) : phase === 'welcome' ? (
         <Onboarding />
       ) : phase === 'username' ? (
@@ -49,6 +53,58 @@ function Centered({ children }: { children: ReactNode }) {
     <div className="fogbank flex min-h-full items-center justify-center p-4">
       <div className="fade-in w-full max-w-md rounded-3xl bg-panel p-8 shadow-[0_30px_80px_-30px_rgba(20,30,40,0.35)]">{children}</div>
     </div>
+  )
+}
+
+function PolicyLink({ path, children }: { path: string; children: ReactNode }) {
+  const url = new URL(path, SERVER).href
+  return <a className="underline" href={url} target="_blank" rel="noopener noreferrer" onClick={(e) => fog.externalClick(e, url)}>{children}</a>
+}
+
+function HostedTerms() {
+  const [adult, setAdult] = useState(false)
+  return (
+    <Centered>
+      <h1 className="text-2xl font-bold">Use Fog on getfog.org</h1>
+      <p className="mt-3">Read the <PolicyLink path="/terms/">Terms of Use</PolicyLink> before continuing. The <PolicyLink path="/privacy/">Privacy Policy</PolicyLink> explains how Fog handles your data.</p>
+      <label className="my-5 flex items-center gap-3"><input type="checkbox" checked={adult} onChange={(e) => setAdult(e.target.checked)} /> I am 18 or older.</label>
+      <Button disabled={!adult} onClick={() => fog.acceptTerms().catch(() => fog.toast("Couldn't save your acceptance on this device. Try again."))}>Agree to the Terms and continue</Button>
+      <button className="mt-5 block text-sm underline" onClick={fog.openAccountDeletion}>Delete an existing account</button>
+    </Centered>
+  )
+}
+
+function DeleteOnline({ done }: { done: boolean }) {
+  const me = useFog((s) => s.me)
+  const [phrase, setPhrase] = useState('')
+  const [confirmed, setConfirmed] = useState(false)
+  const localDeletionFailed = useFog((s) => s.localDeletionFailed)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const words = phrase.trim().toLowerCase().replace(/\s+/g, ' ')
+  const submit = async () => {
+    setBusy(true)
+    setError('')
+    try { await fog.deleteFromBrowser(words) }
+    catch (e) { setError((e as Error).message) }
+    finally { setPhrase(''); setBusy(false) }
+  }
+  return (
+    <Centered>
+      <h1 className="text-2xl font-bold">{done ? 'Account deleted' : 'Delete your Fog account'}</h1>
+      {done ? <p className="mt-3">The server confirmed deletion. {localDeletionFailed ? 'Local data could not be erased. Clear Fog’s data in your browser or device settings.' : 'You can close this page.'}</p> : <>
+        {me && <p className="mt-3 break-all">Account on this device: {me.username ? '@' + me.username : me.id}</p>}
+        {!me?.main && <label className="mt-5 block">Your recovery phrase
+          <input type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} value={phrase} onChange={(e) => setPhrase(e.target.value)} className="mt-2 w-full rounded-lg border border-line bg-raised p-3" />
+          <span className="mt-2 block text-sm text-muted">Fog uses your words on this device to prove account ownership. Never send them to support.</span>
+        </label>}
+        <p className="mt-4">Deletion removes your account, username and current chat backup from {SERVER.host}. Delivered messages can remain with recipients. <PolicyLink path="/delete/">See what is kept.</PolicyLink></p>
+        <label className="my-5 flex items-start gap-3"><input className="mt-1" type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /> I understand that deleting this account is permanent.</label>
+        <Button kind="danger" disabled={busy || !confirmed || (!me?.main && !fog.validPhrase(words))} onClick={submit}>{busy ? 'Deleting…' : 'Permanently delete account'}</Button>
+        {error && <p className="mt-3 text-danger" role="alert">{error}</p>}
+        <button className="mt-5 block text-sm underline" disabled={busy} onClick={() => { const url = new URL(location.href); url.searchParams.delete('delete'); location.replace(url.href) }}>Cancel</button>
+      </>}
+    </Centered>
   )
 }
 
@@ -1234,7 +1290,7 @@ function Settings({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState(profile.name)
   const [showPhrase, setShowPhrase] = useState(false)
   const [notif, setNotif] = useState(typeof Notification === 'undefined' ? 'denied' : Notification.permission)
-  const [dialog, setDialog] = useState<'none' | 'logout' | 'username' | 'share' | 'blocked' | 'lock' | 'devices'>('none')
+  const [dialog, setDialog] = useState<'none' | 'logout' | 'username' | 'share' | 'blocked' | 'lock' | 'devices' | 'delete'>('none')
   const devices = useFog((s) => s.devices)
   const [lockOn, setLockOn] = useState(false)
   useEffect(() => void db.lockEnabled().then(setLockOn), [dialog])
@@ -1472,11 +1528,33 @@ function Settings({ onClose }: { onClose: () => void }) {
 
       <Section title="Help">
         <Row icon="info" title="Fog guide" sub="Tips and answers, in a chat on this device" onClick={() => (onClose(), fog.openGuide())} />
+        <Row icon="info" title="Privacy policy" onClick={() => fog.openExternal('https://getfog.org/privacy/')} />
+        <Row icon="info" title="Terms of use" onClick={() => fog.openExternal('https://getfog.org/terms/')} />
       </Section>
 
       <div className="mt-6">
         <Row icon="out" title={<span className="text-danger">Log out</span>} onClick={() => setDialog('logout')} />
+        {me.main && <Row icon="out" title={<span className="text-danger">Delete account</span>} onClick={() => setDialog('delete')} />}
       </div>
+
+      {dialog === 'delete' && (
+        <Dialog
+          title="Delete your Fog account?"
+          onClose={() => setDialog('none')}
+          actions={
+            <>
+              <Button kind="ghost" onClick={() => setDialog('none')}>
+                Cancel
+              </Button>
+              <Button kind="danger" onClick={() => fog.deleteAccount().catch(() => fog.toast("Couldn't delete your account. Check your connection."))}>
+                Delete account
+              </Button>
+            </>
+          }
+        >
+          This permanently removes your account and current chat backup, frees your username, revokes linked devices and clears this device. Recipients can keep their copies.
+        </Dialog>
+      )}
 
       {dialog === 'logout' && (
         <Dialog

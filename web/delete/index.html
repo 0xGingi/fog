@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="description" content="How to delete your Fog Messenger account, and what is deleted." />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/src/landing.css" />
+    <title>Delete your Fog account</title>
+  </head>
+  <body class="font-sans">
+    <main class="mx-auto max-w-2xl px-4 py-12 leading-relaxed sm:px-6">
+      <a href="/" class="flex items-center gap-2.5 text-xl font-semibold tracking-tight"><img src="/icon.svg" alt="" class="size-8" /> fog</a>
+
+      <h1 class="mt-10 text-3xl font-semibold tracking-tight">Delete your Fog Messenger account</h1>
+      <p class="mt-4 text-muted">You can delete your account in a browser, including after uninstalling Fog. <a href="/app/?delete" class="font-semibold underline underline-offset-4">Delete my account online</a>.</p>
+
+      <h2 class="mt-10 text-xl font-semibold">How to delete from your main device</h2>
+      <ol class="mt-3 list-decimal space-y-1 pl-6">
+        <li>Open Fog on your main device (the one with your recovery phrase).</li>
+        <li>Tap the <strong>menu</strong> button (☰) at the top left to open <strong>Settings</strong>.</li>
+        <li>Scroll to the bottom and tap <strong>Delete account</strong>.</li>
+        <li>Confirm with <strong>Delete account</strong>.</li>
+      </ol>
+      <p class="mt-3 text-muted">Deletion is permanent once the server confirms it. A browser with your main-device key can use it directly. In a fresh browser, your recovery phrase proves ownership locally. The words never go to the server or support. If you need help, email privacy@getfog.org.</p>
+
+      <h2 class="mt-10 text-xl font-semibold">What Fog removes from the active service</h2>
+      <ul class="mt-3 list-disc space-y-1 pl-6">
+        <li>Your account ID and public keys</li>
+        <li>Your username (anyone can claim it afterwards)</li>
+        <li>Linked device registrations and their access to the account</li>
+        <li>Messages still waiting to be delivered to you</li>
+        <li>Push notification tokens</li>
+        <li>Your encrypted chat backup</li>
+        <li>Abuse reports you filed</li>
+        <li>Fog’s local account data in the app or browser session used for deletion. On other devices, clear the app’s local data to remove any remaining copies.</li>
+      </ul>
+
+      <h2 class="mt-10 text-xl font-semibold">What is kept</h2>
+      <ul class="mt-3 list-disc space-y-1 pl-6">
+        <li><strong>Abuse reports other people filed about your account</strong> (just the two account IDs and a time), kept for abuse prevention.</li>
+        <li><strong>Encrypted attachments you sent</strong> and encrypted history archives uploaded when linking devices are eligible for hourly cleanup 45 days after upload.</li>
+        <li><strong>Messages you already sent</strong> can remain on recipients’ devices and in their backups. Encrypted copies still queued for other devices remain until acknowledged or cleaned up after 30 days. Ordinary delivery records can include your sender ID during that time.</li>
+      </ul>
+
+      <p class="mt-10 text-sm text-muted">Questions: <a href="mailto:privacy@getfog.org" class="underline underline-offset-4">privacy@getfog.org</a></p>
+    </main>
+  </body>
+</html>

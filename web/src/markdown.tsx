@@ -62,7 +62,7 @@ function Link({ href, children, plain }: { href: string; children: ReactNode; pl
 // line of thousands of `[` or ` *a` costs n² steps. So single `*`/`_` emphasis can't contain its own
 // marker, link text stops at the next bracket and a link address at the next parenthesis.
 const INLINE =
-  /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)|\*\*(.+?)\*\*|__(.+?)__|(?<![\p{L}\p{N}*])\*(?!\s)([^*]+?)(?<!\s)\*(?![\p{L}\p{N}*])|(?<![\p{L}\p{N}_])_(?!\s)([^_]+?)(?<!\s)_(?![\p{L}\p{N}_])|~~(.+?)~~|\|\|(.+?)\|\||\[([^\[\]\n]+)\]\(\s*<?([^()\s>]+)>?\s*\)|(https?:\/\/[^\s<]+[^\s<.,:;"')\]!?*_])|((?<![\w@])@[a-z][a-z0-9_]{2,31}\b)/gu
+  /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)|\*\*(.+?)\*\*|__(.+?)__|(?<![\p{L}\p{N}*])\*(?!\s)([^*]+?)(?<!\s)\*(?![\p{L}\p{N}*])|(?<![\p{L}\p{N}_])_(?!\s)([^_]+?)(?<!\s)_(?![\p{L}\p{N}_])|~~(.+?)~~|\|\|(.+?)\|\||\[([^\[\]\n]+)\]\(\s*<?([^()\s>]+)>?\s*\)|(https?:\/\/[^\s<]+[^\s<.,:;"')\]!?*_])|((?<![\w@])@[a-z][a-z0-9_]{2,31}\b)|\\([\\`*_~|[\]#>+\-.!()])/gu
 
 function Spoiler({ children }: { children: ReactNode }) {
   const [shown, setShown] = useState(false)
@@ -113,6 +113,7 @@ export function inline(s: string, key: string, depth = 0): ReactNode[] {
         </Link>,
       )
     else if (m[12]) out.push(<span key={k} className="mention">{m[12]}</span>)
+    else if (m[13]) out.push(m[13]) // a backslash-escaped character, shown as itself
     last = m.index + m[0].length
   }
   if (last < s.length) out.push(s.slice(last))
@@ -283,3 +284,4 @@ export const mdPlain = (t: string) =>
     .replace(/```[\w+#.-]*\n?|`/g, '')
     .replace(/\*\*|__|~~|\|\|/g, '')
     .replace(/\[([^\[\]]+)\]\([^()]+\)/g, '$1')
+    .replace(/\\([\\`*_~|[\]#>+\-.!()])/g, '$1')

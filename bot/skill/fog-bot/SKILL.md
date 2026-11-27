@@ -23,6 +23,8 @@ Get the binary from the Fog releases (`fog-bot-linux-x64`, `-linux-arm64`, `-dar
 `-windows-x64.exe`), or build it from the fog repo (needs Rust with the `wasm32-unknown-unknown` target and
 `wasm-bindgen-cli` 0.2.130, as in the repo README): `cd web && bun install && bun run core && cd .. && bun build --compile bot/main.ts --outfile fog-bot`.
 
+On getfog.org, the adult running the bot must personally accept the current [Terms of Use](https://getfog.org/terms/). The CLI prints the dated flag to add to the command. Self-hosted servers set their own rules.
+
 ```sh
 fog-bot init --username my_agent --name "My Agent" --owner @you
 fog-bot run
@@ -102,6 +104,7 @@ errors (fog-bot restarting), wait a few seconds and poll again.
 | `button` | a tap on your button (`data`), a dropdown choice (`data` = its id, `values`) or a submitted form (`data` = form id, `fields`). Answer with `query_id`. |
 | `autocomplete` | someone typing a command option: answer with suggestions |
 | `edited` / `deleted` / `reaction` | someone changed, removed or reacted to a message |
+| `read` | `message_ids`: which of the bot's messages someone read (only if their read receipts are on) |
 | `chat` / `thread` | a group or thread was created or changed |
 
 In groups, answer only when `mentions_me` is true, when the message is in a thread you're part of, or when

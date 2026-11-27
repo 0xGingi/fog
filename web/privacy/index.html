@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="description" content="What Fog Messenger's server can and can't see, what it keeps, and for how long." />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/src/landing.css" />
+    <title>Fog Privacy Policy</title>
+  </head>
+  <body class="font-sans">
+    <main class="mx-auto max-w-2xl px-4 py-12 leading-relaxed sm:px-6 [&_h2]:mt-10 [&_h2]:text-xl [&_h2]:font-semibold [&_h3]:mt-6 [&_h3]:font-semibold [&_p]:mt-3 [&_ul]:mt-3 [&_ul]:list-disc [&_ul]:space-y-1.5 [&_ul]:pl-6 [&_a]:underline [&_a]:underline-offset-4">
+      <a href="/" class="flex items-center gap-2.5 text-xl font-semibold tracking-tight no-underline!"><img src="/icon.svg" alt="" class="size-8" /> fog</a>
+
+      <h1 class="mt-10 text-3xl font-semibold tracking-tight">Privacy Policy</h1>
+      <p class="text-muted">Effective November 27, 2026</p>
+
+      <p>This policy covers Fog Messenger ("Fog"): the apps for Android, iOS, desktop and the web, and the Fog server at getfog.org, operated by 0xGingi ("we") as a hobby project in testing. Fog is open source, so you can check everything here against <a href="https://github.com/0xGingi/fog" rel="noopener">the code</a>.</p>
+      <p>Anyone can run their own Fog server. If your app is connected to a server someone else runs, that person, not us, decides what their server keeps, and this policy doesn't cover it.</p>
+
+      <h2>The short version</h2>
+      <ul>
+        <li>Your device creates your account key. Signing up requires no phone number, email address or real name. The hosted service is for people aged 18 and older.</li>
+        <li>Messages, calls, photos, files, voice notes, your display name and picture, your groups and your backups are end-to-end encrypted. The Fog relay cannot read their contents.</li>
+        <li>Fog contains no advertising or usage analytics SDKs. Test distributions can provide separate diagnostics as described below. We do not sell personal data or share it for advertising.</li>
+        <li>The server keeps delivery records, account and device information, abuse reports and encrypted files. The main device backs up chat history by default.</li>
+      </ul>
+
+      <h2>What we can't see</h2>
+      <p>Fog uses the Signal Protocol for messaging. Your devices encrypt the following content before sending it through the Fog relay. Recipients, including bots you message, can read what you send to them.</p>
+      <ul>
+        <li>Message contents, reactions, edits and replies</li>
+        <li>Photos, videos, voice notes, files, stickers and GIFs</li>
+        <li>Voice and video calls</li>
+        <li>Your display name and profile picture</li>
+        <li>Group names, pictures and member lists</li>
+        <li>Your chat list, contacts and block list</li>
+        <li>Chat backups (encrypted with a key from your recovery phrase)</li>
+      </ul>
+      <p>When your client has the recipient’s access key, sealed sender omits your account ID from the delivery request. The relay still sees the connecting IP address.</p>
+
+      <h2>What the server stores</h2>
+      <h3>Your account</h3>
+      <ul>
+        <li><strong>Account ID and public keys.</strong> Your account ID is a public key. We keep it, the public keys others need to start encrypted chats with you, and when the account was created, until you delete your account.</li>
+        <li><strong>Username (optional).</strong> If you choose a username, it's stored in plain text and anyone can look it up to find your account. You can change it any time, and it's deleted with your account.</li>
+        <li><strong>Devices.</strong> For each device on your account: a label such as "Fog for Android" or "Chrome on macOS", when it was linked and when it last connected. Kept until you unlink the device or delete your account.</li>
+      </ul>
+      <h3>Messages and files in transit</h3>
+      <ul>
+        <li><strong>Encrypted messages</strong> are queued separately for each destination device with the recipient’s account ID, device ID and a timestamp. The relay sees whether delivery should wake a phone or ring for a call. Each queued copy is removed after the device acknowledges it or during hourly cleanup once it is more than 30 days old.</li>
+        <li><strong>Sender information.</strong> Ordinary delivery also records the sender’s account and device IDs. This includes first contacts without an access key, syncs between your own devices, and retries you authorize after sealed delivery is refused.</li>
+        <li><strong>Encrypted attachments</strong> become eligible for hourly cleanup 45 days after upload.</li>
+        <li><strong>Chat backups.</strong> By default, the main device periodically uploads encrypted chat history and attachment references. The server associates the latest backup with your account and sees its size. Your recovery phrase unlocks it. A new backup replaces the old one. Turning backups off requests removal when your main device can reach the server and any pending restore is resolved. Account deletion removes the current backup.</li>
+      </ul>
+      <p>Linking another device can upload a separate encrypted chat-history archive even when regular backups are off. This archive follows the 45-day attachment cleanup schedule, including after account deletion. The short-lived pairing channel carries the information needed to open it.</p>
+      <h3>Notifications</h3>
+      <ul>
+        <li><strong>Push token.</strong> When Fog notifications are enabled, the mobile app can register a token with the server to wake your device. Android can obtain a Firebase token even if you decline the system prompt to display notifications. The provider receives a generic message or call alert. If you enable on-device previews, your device can display a sender or message text. Turning notifications off in Fog or logging out requests token removal. If the request cannot reach the server, the token can remain until a successful removal, device unlink, account deletion or a provider response that invalidates it.</li>
+      </ul>
+      <h3>Abuse reports</h3>
+      <ul>
+        <li>If you report an account, we store your account ID, theirs and the time. No message content is sent. We keep the newest 1,000 reports per person. Reports you filed are deleted with your account; reports others filed about an account are kept to prevent abuse.</li>
+      </ul>
+
+      <h2>Connections, previews and calls</h2>
+      <ul>
+        <li><strong>IP addresses.</strong> The server sees your IP address when you connect. The Fog application uses connection addresses and IP-based counters in memory to limit spam and abuse. These counters expire as rate limits reset. IP addresses are not part of the Fog account or message database.</li>
+        <li><strong>Link previews</strong> are off by default. If you turn them on, the link you're typing is sent to our server, which fetches the page's title and image from its own IP address (so the site never sees yours) and sends them back. The destination receives the requested URL, including any identifying information in it. Opening the link yourself connects you directly to that site.</li>
+        <li><strong>Calls.</strong> By default, calls go through our relay server so the other person never learns your IP address. The relay only passes along encrypted audio and video. It uses connection addresses and credentials tied to your account while relaying the call. If you turn off “Relay all calls,” the other participant in a one-to-one call may learn your IP address. Group calls always use the relay.</li>
+      </ul>
+
+      <h2>Who else is involved</h2>
+      <ul>
+        <li><strong>Google (Firebase Cloud Messaging) and Apple (Push Notification service)</strong> deliver notifications on Android and iOS. They see your push token, the time a notification is sent and the generic alert or call indicator. On Android, Firebase also uses an installation ID to deliver them. We don't use any other Firebase feature: no analytics, no crash reporting. Their own privacy policies apply to that service.</li>
+        <li><strong>GitHub</strong> hosts our app downloads. The version of the Android app downloaded from GitHub (not Google Play) checks GitHub for updates, which shows GitHub your IP address. The desktop apps do the same.</li>
+        <li><strong>Bots and bridges.</strong> A bot receives your messages as a chat participant. Its operator can store or forward them, including to an AI provider. The optional Telegram bridge reads messages on the bridge machine and copies them between services. Telegram stores ordinary Telegram chats under its own policy.</li>
+        <li><strong>Hosting.</strong> Our messaging server runs on an OVHcloud VPS in Virginia, United States. When you connect from another country, the service processes the data described above in the United States.</li>
+        <li><strong>Email support.</strong> Our email provider handles support correspondence. If you contact support, we receive your email address and whatever you send. We use them to respond, verify and follow up on your request. We retain correspondence for as long as needed to resolve the issue, document our response or meet legal obligations. Never email your recovery phrase.</li>
+        <li><strong>App stores</strong> (Google Play, Apple App Store) handle downloads and testing under their own policies. Google Play closed testing may use your Google account email or testing-group membership for access. Apple TestFlight can share installation and usage information, crash reports, submitted feedback and, depending on how you join or submit feedback, contact details with the developer. We use testing information to manage the test and improve Fog. <a href="https://testflight.apple.com/" rel="noopener">Apple’s TestFlight privacy information</a>.</li>
+      </ul>
+      <p>We may disclose data we hold when legally required. The relay has no keys to decrypt your chats.</p>
+
+      <h2>On your device</h2>
+      <p>Fog stores keys, messages, contacts and settings on your device. Enabling app lock encrypts Fog’s local database. Fog requests camera access for calls, video notes and QR codes, microphone access for calls and voice notes, and notification permission on supported devices. QR codes are read on your device. Fog doesn't access your location, phone contacts or calendar.</p>
+
+      <h2>Security</h2>
+      <p>The official client connects to the getfog.org messaging server using HTTPS and secure WebSockets. Call audio and video are always encrypted end to end.</p>
+
+      <h2>Your choices and rights</h2>
+      <ul>
+        <li><strong>Delete your account</strong> on your main device in Settings → Delete account or from a browser. See <a href="/delete/">what's deleted and what's kept</a>.</li>
+        <li>Turn off notifications, backups or link previews, unlink devices, or change your username, all in Settings.</li>
+        <li>Depending on where you live, you may request access, correction, deletion, restriction or portability of personal data, object to processing, or lodge a complaint with your local data protection authority. Email us to exercise these rights. For account-specific requests we may ask for proof that you control the account key. An email address alone cannot establish ownership.</li>
+      </ul>
+      <p>We process this data to deliver the service under our agreement with you, pursue our legitimate interests in preventing abuse and answering inquiries, and meet applicable legal obligations. For privacy requests we use the information needed to handle the request and document the outcome.</p>
+
+      <h2>Age requirement</h2>
+      <p>The hosted service is for adults aged 18 or older. The official client asks you to confirm your age and saves the accepted terms version locally. We do not ask for a birth date. If you believe someone under 18 has an account, contact privacy@getfog.org. You can use the browser deletion option without accepting the terms.</p>
+
+      <h2>Changes</h2>
+      <p>We will post revisions here with their effective date. We will give notice of material changes and seek consent where required.</p>
+
+      <h2>Contact</h2>
+      <p>Questions or requests about privacy: <a href="mailto:privacy@getfog.org">privacy@getfog.org</a>.</p>
+
+      <p class="mt-10! text-sm text-muted"><a href="/terms/">Terms of use</a> · <a href="/delete/">Delete your account</a></p>
+    </main>
+  </body>
+</html>
