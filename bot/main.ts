@@ -8,17 +8,19 @@ import { homedir } from 'node:os'
 // The crypto core, embedded in the binary by `bun build --compile`.
 import wasmPath from '../web/src/core/fog_core_bg.wasm' with { type: 'file' }
 
-const VERSION = '0.4.3'
+const VERSION = '0.5.0'
 const USAGE = `fog-bot ${VERSION}: run a Fog account as a bot, with a local HTTP API.
 
   fog-bot init [--server URL] [--username NAME] [--name "Display name"] [--owner @you] [--restore]
       Create the bot's account (or --restore one from its recovery phrase, read from stdin).
       --owner: only this person (and anyone added with \`fog-bot allow\`) can reach the bot.
-  fog-bot run [--port 8790] [--host 127.0.0.1] [--allow @you,@them]
-      Connect and serve the API (see the README for the endpoints).
+      If that account can't be found, nobody can reach the bot until you set the list.
+  fog-bot run [--port 8790] [--host 127.0.0.1] [--allow @you,@them] [--tls-cert FILE --tls-key FILE]
+      Connect and serve the API (see the README for the endpoints). Listening beyond this
+      machine (--host) needs TLS, so the token never crosses the network in the clear.
   fog-bot allow [--add @x,ID] [--remove @x,ID] [--set @x,ID] [--clear]
       Who the bot talks to. Anyone else can't reach it: their messages stay unanswered
-      requests and never show up in the API. With an empty list, anyone can.
+      requests and never show up in the API. With an empty list (--clear), anyone can.
       Works while \`fog-bot run\` is running: it picks up the change within a second.
   fog-bot token [--rotate]
       Print the API token (or replace it).
@@ -39,8 +41,12 @@ for (let i = 0; i < rest.length; i++) {
 }
 const flag = (k: string) => (typeof flags[k] === 'string' ? (flags[k] as string) : undefined)
 const dir = flag('dir') ?? process.env.FOG_BOT_DIR ?? join(homedir(), '.fog-bot')
-/** `allow`: account ids the bot talks to (empty: anyone). Usernames are looked up once, when added. */
-type Config = { server: string; port: number; host: string; accept: 'all' | 'none'; allow: string[] }
+/**
+ * `allow`: account ids the bot talks to (empty: anyone, unless `closed`). Usernames are looked up once, when added.
+ * `closed`: nobody can reach the bot yet (its --owner couldn't be set up); cleared by setting a list, or by --clear.
+ * `tlsCert`/`tlsKey`: serve the API over HTTPS (needed to listen beyond this machine).
+ */
+type Config = { server: string; port: number; host: string; accept: 'all' | 'none'; allow: string[]; closed?: boolean; tlsCert?: string; tlsKey?: string }
 /** A change to the allowlist, from `fog-bot allow` to the running bot. */
 type AllowChange = { id: string; clear?: boolean; set?: string[]; add?: string[]; remove?: string[] }
 const configPath = join(dir, 'config.json')
@@ -48,11 +54,25 @@ const config: Config = { server: 'https://getfog.org', port: 8790, host: '127.0.
 if (flag('server')) config.server = flag('server')!.replace(/\/+$/, '')
 if (flag('port')) config.port = Number(flag('port'))
 if (flag('host')) config.host = flag('host')!
+if (flag('tls-cert')) config.tlsCert = flag('tls-cert')
+if (flag('tls-key')) config.tlsKey = flag('tls-key')
 if (flag('accept') === 'all' || flag('accept') === 'none') config.accept = flag('accept') as Config['accept']
 /** Write a file whole (temp file, then rename), so a reader never sees half of it. */
 const writeAtomic = (path: string, text: string) => {
   writeFileSync(`${path}.tmp`, text, { mode: 0o600 })
   renameSync(`${path}.tmp`, path)
+}
+// The token is the whole account: it never goes over the network unencrypted. Beyond this machine, the API
+// is HTTPS only (or keep it on 127.0.0.1 and put a TLS proxy or an SSH tunnel in front).
+const loopback = /^(localhost|127(\.\d{1,3}){3}|::1|\[::1\])$/i.test(config.host)
+const tls = config.tlsCert && config.tlsKey ? { cert: Bun.file(config.tlsCert), key: Bun.file(config.tlsKey) } : undefined
+if (cmd === 'run') {
+  if (!!config.tlsCert !== !!config.tlsKey) fail('TLS needs both --tls-cert and --tls-key.')
+  for (const f of [config.tlsCert, config.tlsKey]) if (f && !existsSync(f)) fail(`No such file: ${f}`)
+  if (!loopback && !tls)
+    fail(`Refusing to serve the API on ${config.host} over plain HTTP: anyone on the network path could read the token, and with it read and send as this bot.
+Either give it a certificate (--tls-cert cert.pem --tls-key key.pem), or keep --host 127.0.0.1 and reach it
+through a TLS reverse proxy or an SSH tunnel (ssh -L 8790:127.0.0.1:8790 bot-host).`)
 }
 const saveConfig = () => writeAtomic(configPath, JSON.stringify(config, null, 2) + '\n')
 const tokenPath = join(dir, 'token')
@@ -89,6 +109,7 @@ const runningPid = (() => {
     return null
   }
 })()
+const CLOSED = 'Nobody can reach the bot yet: its owner was never set up. Set one with: fog-bot allow --add @you'
 // The running bot does the change (it can look up @usernames) and answers in allow-result.json. All or
 // nothing: if any name doesn't resolve, the list stays as it was.
 if (cmd === 'allow' && runningPid) {
@@ -106,9 +127,10 @@ if (cmd === 'allow' && runningPid) {
     if (res?.id !== req.id) fail(`The running bot (pid ${runningPid}) didn't answer. Nothing changed; is it connected?`)
     if (!res.ok) fail(`Nothing changed: ${res.error}`)
     config.allow = res.allow ?? []
+    if (!config.allow.length) delete config.closed // emptied on purpose (--clear): open
     console.log('Saved; the running bot uses it now.')
   }
-  console.log(config.allow.length ? `The bot talks only to:\n${config.allow.map((e) => `  ${e}`).join('\n')}` : 'Anyone can message the bot (no allowlist).')
+  console.log(config.allow.length ? `The bot talks only to:\n${config.allow.map((e) => `  ${e}`).join('\n')}` : config.closed ? CLOSED : 'Anyone can message the bot (no allowlist).')
   process.exit(0)
 }
 
@@ -140,6 +162,8 @@ const core = await import('../web/src/core/fog_core.js')
 await core.default({ module_or_path: await Bun.file(wasmPath).arrayBuffer() })
 const fog = await import('../web/src/fog')
 const media = await import('../web/src/media')
+// Before anything connects (every command goes online): nothing is sent to anyone off the allowlist.
+fog.setBotHooks({ reach: (peer) => allowed(peer) })
 await fog.boot()
 
 // ---------- who the bot talks to ----------
@@ -162,7 +186,9 @@ const showAllow = () =>
   console.log(
     config.allow.length
       ? `The bot talks only to:\n${config.allow.map((id) => `  ${id}${fog.getState().people[id]?.username ? ` (@${fog.getState().people[id]?.username})` : ''}`).join('\n')}`
-      : 'Anyone can message the bot (no allowlist). Set one with: fog-bot allow --add @you',
+      : config.closed
+        ? CLOSED
+        : 'Anyone can message the bot (no allowlist). Set one with: fog-bot allow --add @you',
   )
 
 if (cmd === 'init') await init()
@@ -172,6 +198,7 @@ if (cmd === 'info' || cmd === 'allow') {
   await fog.waitOnline()
   if (cmd === 'info') console.log(`account: ${me.id}\nusername: ${fog.getState().me?.username ? '@' + fog.getState().me?.username : '(none)'}\ninvite: ${fog.inviteLink()}`)
   if (cmd === 'allow') {
+    const change = flags.clear || flag('set') || flag('add') || flag('remove')
     if (flags.clear) config.allow = []
     if (flag('set')) config.allow = await lookup(flag('set')!)
     if (flag('add')) config.allow = [...new Set([...config.allow, ...(await lookup(flag('add')!))])]
@@ -179,8 +206,10 @@ if (cmd === 'info' || cmd === 'allow') {
       const gone = await lookup(flag('remove')!)
       config.allow = config.allow.filter((id) => !gone.includes(id))
     }
-    if (!config.allow.length && !flags.clear) fail(EMPTY)
-    if (flags.clear || flag('set') || flag('add') || flag('remove')) (saveConfig(), console.log('Saved. Restart fog-bot run if it\'s running.'))
+    if (change && !config.allow.length && !flags.clear) fail(EMPTY)
+    // A list, or an explicit --clear (open on purpose), ends the closed state.
+    if (change) delete config.closed
+    if (change) (saveConfig(), console.log('Saved.'))
   }
   showAllow()
   process.exit(0)
@@ -198,6 +227,8 @@ async function init() {
     phrase = (await Bun.stdin.text()).trim().replace(/\s+/g, ' ')
     if (!fog.validPhrase(phrase)) fail("That isn't a valid recovery phrase.")
   }
+  // Asked for an owner: closed until they're found, so a failure anywhere below never leaves the bot open.
+  if (flag('owner')) config.closed = true
   saveConfig()
   console.log(`Creating the bot's account on ${config.server}…`)
   await fog.createAccount(phrase)
@@ -209,15 +240,19 @@ async function init() {
     if (ok !== 'available') console.error(`Username @${username} is ${ok}; the bot has none for now.`)
     else await fog.claimUsername(username)
   } else fog.skipUsername()
-  // A bad --owner mustn't stop init before the recovery phrase is shown: warn, and leave the list empty.
+  // A bad --owner mustn't stop init before the recovery phrase is shown, and mustn't leave the bot open
+  // either: it stays closed (nobody can reach it) and init fails at the end.
+  let ownerFailed = false
   if (flag('owner'))
     try {
       config.allow = await lookup(flag('owner')!, (msg) => {
         throw new Error(msg)
       })
+      delete config.closed
       saveConfig()
     } catch (e) {
-      console.error(`\n${(e as Error).message} The bot has no allowlist yet: set one with fog-bot allow --add @you`)
+      ownerFailed = true
+      console.error(`\n${(e as Error).message} Nobody can reach the bot until you set its allowlist: fog-bot allow --add @you`)
     }
   await Bun.sleep(500) // let the profile and username settle
   console.log(`
@@ -230,49 +265,118 @@ Recovery phrase (the only way to get this account back; keep it somewhere safe):
 API token (also in ${tokenPath}):
   ${token()}
 
-${config.allow.length ? `Only ${flag('owner')} can reach it (add people with: fog-bot allow --add @them).` : 'Anyone can message it. To keep it to yourself: fog-bot allow --add @you'}
+${config.allow.length ? `Only ${flag('owner')} can reach it (add people with: fog-bot allow --add @them).` : config.closed ? `Nobody can reach it: ${flag('owner')} couldn't be set as its owner. Fix it with: fog-bot allow --add @you` : 'Anyone can message it. To keep it to yourself: fog-bot allow --add @you'}
 Start it with: fog-bot run`)
-  process.exit(0)
+  process.exit(ownerFailed ? 1 : 0)
 }
 
 // ---------- run: events ----------
 if (!fog.getState().me) fail('No account yet: run `fog-bot init` first.')
+const me0 = fog.getState().me!.id
 store.db.run('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ev TEXT NOT NULL, at INTEGER NOT NULL)')
 store.db.run('CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, att TEXT NOT NULL)')
-const insertEvent = store.db.query('INSERT INTO events (ev, at) VALUES (?, ?)')
+store.db.run('CREATE TABLE IF NOT EXISTS botmeta (k TEXT PRIMARY KEY, v TEXT NOT NULL)')
+// Added later: each event's size and sender (storage budgets), and whose chat each file came from.
+const addColumn = (sql: string) => {
+  try {
+    store.db.run(sql)
+  } catch {} // already there
+}
+addColumn('ALTER TABLE events ADD COLUMN size INTEGER NOT NULL DEFAULT 0')
+addColumn('ALTER TABLE events ADD COLUMN who TEXT')
+addColumn('ALTER TABLE files ADD COLUMN chat TEXT')
+addColumn('ALTER TABLE files ADD COLUMN who TEXT')
+store.db.run('CREATE INDEX IF NOT EXISTS events_who ON events (who)')
+const meta = {
+  get: (k: string) => store.db.query<{ v: string }, [string]>('SELECT v FROM botmeta WHERE k = ?').get(k)?.v,
+  set: (k: string, v: string) => store.db.run('INSERT OR REPLACE INTO botmeta (k, v) VALUES (?, ?)', [k, v]),
+}
+const insertEvent = store.db.query('INSERT INTO events (ev, at, size, who) VALUES (?, ?, ?, ?)')
 const waiting = new Set<() => void>()
 type Ev = Record<string, unknown> & { type: string }
+// Uncollected events are capped, so nobody can fill the disk by writing to the bot: per sender, then in
+// all. The oldest go first.
+const MAX_EVENTS = 10_000
+const MAX_EVENT_BYTES = 64 << 20
+const MAX_SENDER_EVENTS = 1_000
+let warnedFull = 0
 function emit(ev: Ev) {
-  insertEvent.run(JSON.stringify({ ...ev, date: Date.now() }), Date.now())
+  const text = JSON.stringify({ ...ev, date: Date.now() })
+  const who = evFrom(ev) ?? null
+  insertEvent.run(text, Date.now(), text.length, who)
+  let dropped = 0
+  if (who) {
+    const n = store.db.query<{ n: number }, [string]>('SELECT COUNT(*) AS n FROM events WHERE who = ?').get(who)!.n
+    if (n > MAX_SENDER_EVENTS) dropped += store.db.run('DELETE FROM events WHERE seq IN (SELECT seq FROM events WHERE who = ? ORDER BY seq LIMIT ?)', [who, n - MAX_SENDER_EVENTS]).changes
+  }
+  for (;;) {
+    const t = store.db.query<{ n: number; b: number }, []>('SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS b FROM events').get()!
+    if (t.n <= MAX_EVENTS && t.b <= MAX_EVENT_BYTES) break
+    dropped += store.db.run('DELETE FROM events WHERE seq IN (SELECT seq FROM events ORDER BY seq LIMIT ?)', [Math.max(1, t.n - MAX_EVENTS, 100)]).changes
+  }
+  if (dropped && Date.now() - warnedFull > 60_000) (warnedFull = Date.now()), console.warn(`events: too many waiting to be collected; dropped the oldest ${dropped}`)
   waiting.forEach((w) => w())
 }
 // Events nobody collected in a week are dropped (like the server's own queue).
 setInterval(() => store.db.run('DELETE FROM events WHERE at < ?', [Date.now() - 7 * 86400_000]), 3600_000)
+/** Who an event is from, and which chat it's in (from its JSON). */
+const evFrom = (e: any): string | undefined => e.message?.from?.id ?? e.from?.id
+const evChat = (e: any): string | undefined => e.message?.chat?.id ?? e.chat?.id
+/** Whether a saved event may still be handed out: its chat and sender pass the allowlist as it is now. */
+const evOk = (e: any) => {
+  const chat = evChat(e)
+  const from = evFrom(e)
+  return (!chat || chatShown(chat)) && (!from || allowed(from))
+}
+/** Drop saved events that the allowlist no longer lets through (someone was taken off it). */
+function purgeEvents() {
+  const del = store.db.query('DELETE FROM events WHERE seq = ?')
+  for (const r of store.db.query<{ seq: number; ev: string }, []>('SELECT seq, ev FROM events').all()) if (!evOk(JSON.parse(r.ev))) del.run(r.seq)
+}
 
 type Msg = ReturnType<typeof fog.getState>['chats'][string]['messages'][number]
 type Att = NonNullable<Msg['att']>
-const rememberFile = store.db.query('INSERT OR REPLACE INTO files (id, att) VALUES (?, ?)')
-const fileAtt = (id: string) => {
-  const r = store.db.query<{ att: string }, [string]>('SELECT att FROM files WHERE id = ?').get(id)
-  return r ? (JSON.parse(r.att) as Att) : undefined
+// Every file the API hands out, with where it came from: a file is only served (or re-sent) while whoever
+// sent it, in that chat, still passes the allowlist.
+const rememberFile = store.db.query('INSERT OR REPLACE INTO files (id, att, chat, who) VALUES (?, ?, ?, ?)')
+/** Files the bot is uploading right now (stored before they're remembered). */
+const uploading = new Set<string>()
+function fileOk(id: string) {
+  const r = store.db.query<{ att: string; chat: string | null; who: string | null }, [string]>('SELECT att, chat, who FROM files WHERE id = ?').get(id)
+  if (!r) return undefined
+  const att = JSON.parse(r.att) as Att
+  if (r.who === me0) return att
+  if (r.who && r.chat) return chatShown(r.chat) && allowed(r.who) ? att : undefined
+  // Remembered before files had an origin: allowed if a message the API may show carries it.
+  for (const c of Object.values(fog.getState().chats)) if (chatShown(c.id) && c.messages.some((m) => m.att?.lid === id && visible(c.id, m))) return att
 }
+/** A file by id, if the API may use it (404 otherwise: it doesn't say whose it was). */
+const fileAtt = (id: string) => fileOk(id)
+// Attachments are only ever written to disk for the bot's own uploads and for messages the API can see:
+// someone the bot doesn't talk to can't make it download their files.
+store.gate = (key) => uploading.has(key.slice(4)) || !!fileOk(key.slice(4))
 
 const people = () => fog.getState().people
 function user(id: string) {
   const me = fog.getState().me!
   if (id === me.id) return { id, username: me.username, name: fog.getState().profile.name || null, is_bot: true }
   const p = people()[id]
-  return { id, username: p?.username ?? null, name: p?.name ?? null, is_bot: !!p?.bot }
+  // The name and bot card come from their encrypted profile: only for people the bot talks to.
+  const ok = allowed(id)
+  return { id, username: p?.username ?? null, name: ok ? (p?.name ?? null) : null, is_bot: ok && !!p?.bot }
 }
+/** A message the API may show: the bot's own, or from someone on the allowlist. */
+const visible = (chat: string, m: Msg) => m.mine || allowed(m.from ?? chat)
 function chatInfo(id: string) {
   const c = fog.getState().chats[id]
   const group = c?.group
+  const pins = c?.pins?.filter((p) => c.messages.some((m) => m.id === p && visible(id, m)))
   return {
     id,
     type: group ? 'group' : 'dm',
     title: c ? fog.chatTitle(c) : fog.personName(id),
-    ...(group ? { owner: group.owner, members: group.members.filter((m) => !group.gone?.includes(m)).map(user), left: !!group.left } : {}),
-    ...(c?.pins?.length ? { pinned: c.pins } : {}),
+    ...(group ? { owner: group.owner, members: group.members.filter((m) => !group.gone?.includes(m) && allowed(m)).map(user), left: !!group.left } : {}),
+    ...(pins?.length ? { pinned: pins } : {}),
   }
 }
 /** `{thread}` for a message that's in one (deleted messages: remembered from when they were seen). */
@@ -281,19 +385,27 @@ function threadAt(chat: string, id: string) {
   const th = fog.getState().chats[chat]?.messages.find((m) => m.id === id)?.th ?? msgThreads.get(id)
   return th ? { thread: thread(chat, th) } : {}
 }
+type Thread = NonNullable<ReturnType<typeof fog.getState>['chats'][string]['threads']>[string]
+/** A thread started by someone on the allowlist (or the bot). One we were caught up on: by whoever its id belongs to. */
+const threadOk = (t: Thread) => open() || (t.by ? allowed(t.by) : [me0, ...config.allow].some((a) => t.id.startsWith(`${a.slice(0, 16)}.`)))
 function thread(chat: string, id: string) {
   const t = fog.getState().chats[chat]?.threads?.[id]
+  // Someone else's thread keeps its id (messages in it are still in it), but not its name or starter.
+  if (t && !threadOk(t)) return { id, name: 'Thread' }
   return { id, name: t?.name ?? 'Thread', ...(t?.root ? { message_id: t.root } : {}), ...(t?.by ? { by: user(t.by) } : {}) }
 }
-function file(att: Att) {
-  rememberFile.run(att.lid, JSON.stringify(att))
+function file(att: Att, chat: string | null, from: string) {
+  rememberFile.run(att.lid, JSON.stringify(att), chat, from)
   return { file_id: att.lid, kind: att.kind, mime: att.mime, name: att.name, size: att.size, width: att.w, height: att.h, duration: att.dur }
 }
 function message(chat: string, m: Msg) {
   const c = fog.getState().chats[chat]
   const me = fog.getState().me!.id
   const from = m.mine ? me : (m.from ?? chat)
-  const reply = m.reply ? c?.messages.find((x) => x.id === m.reply) : undefined
+  // Only quote what the API may show: a reply to someone else's message keeps just the id.
+  const reply = m.reply ? c?.messages.find((x) => x.id === m.reply && visible(chat, x)) : undefined
+  const men = m.men?.filter((x) => x === me || allowed(x))
+  const re = Object.entries(m.re ?? {}).filter(([who]) => who === 'me' || allowed(who))
   return {
     id: m.id,
     chat: { id: chat, type: c?.group ? 'group' : 'dm', title: c ? fog.chatTitle(c) : fog.personName(chat) },
@@ -303,14 +415,14 @@ function message(chat: string, m: Msg) {
     ...(m.mine && m.status ? { status: m.status === 'failed' ? 'queued' : m.status } : {}),
     ...(m.sys ? { system: m.sys } : {}),
     ...(m.reply ? { reply_to: { id: m.reply, ...(reply ? { text: reply.text, from: user(reply.mine ? me : (reply.from ?? chat)) } : {}) } } : {}),
-    ...(m.men?.length ? { mentions: m.men.map(user), mentions_me: m.men.includes(me) } : {}),
-    ...(m.att ? { attachment: file(m.att) } : {}),
+    ...(m.men?.length ? { mentions: men!.map(user), mentions_me: m.men.includes(me) } : {}),
+    ...(m.att ? { attachment: file(m.att, chat, from) } : {}),
     ...(m.poll ? { poll: { question: m.poll.q, options: m.poll.o, multiple: !!m.poll.multi } } : {}),
     ...(m.fwd ? { forwarded: true } : {}),
     ...(m.edited ? { edited: true } : {}),
     ...(m.only ? { only_me: true } : {}),
     ...(m.th ? (msgThreads.set(m.id, m.th), { thread: thread(chat, m.th) }) : {}),
-    ...(m.re && Object.keys(m.re).length ? { reactions: Object.entries(m.re).map(([who, emoji]) => ({ from: user(who === 'me' ? me : who), emoji })) } : {}),
+    ...(re.length ? { reactions: re.map(([who, emoji]) => ({ from: user(who === 'me' ? me : who), emoji })) } : {}),
   }
 }
 
@@ -334,9 +446,9 @@ setInterval(() => queries.forEach((q, k) => Date.now() - q.at > 15 * 60_000 && q
 
 if (flag('allow')) {
   config.allow = await lookup(flag('allow')!)
+  delete config.closed
   saveConfig()
 }
-const me0 = fog.getState().me!.id
 // Changes while running, without a restart: `fog-bot allow` (allow-request.json), an edit to config.json,
 // and `fog-bot token --rotate` (the old token stops working right away).
 const debounce = new Map<string, ReturnType<typeof setTimeout>>()
@@ -371,12 +483,19 @@ async function resolveAll(entries: string[]) {
   if (bad.length) throw new Error(`no Fog account ${bad.join(', ')}`)
   return ids
 }
-function useAllow(next: string[]) {
-  if (JSON.stringify(next) === JSON.stringify(config.allow)) return
+function useAllow(next: string[], closed = false) {
+  closed = closed && !next.length
+  if (JSON.stringify(next) === JSON.stringify(config.allow) && closed === !!config.closed) return
   config.allow = next
-  console.log(next.length ? `allowlist: now ${next.length} ${next.length === 1 ? 'person' : 'people'}` : 'allowlist: cleared; anyone can message the bot')
+  if (closed) config.closed = true
+  else delete config.closed
+  console.log(next.length ? `allowlist: now ${next.length} ${next.length === 1 ? 'person' : 'people'}` : closed ? 'allowlist: empty; nobody can reach the bot' : 'allowlist: cleared; anyone can message the bot')
   // People just added may be waiting as requests; people just removed go back to being requests.
   for (const c of Object.values(fog.getState().chats)) accept(c.id)
+  // And whatever was waiting for the API from people now off the list goes.
+  purgeEvents()
+  queries.forEach((q, k) => !queryOk(q) && queries.delete(k))
+  rotateIfNarrowed()
 }
 async function applyAllowChange() {
   const path = join(dir, 'allow-request.json')
@@ -390,7 +509,7 @@ async function applyAllowChange() {
     const gone = await resolveAll(req.remove ?? [])
     next = next.filter((id) => !gone.includes(id))
     if (!next.length && !req.clear) throw new Error(EMPTY.replace('Nothing changed: ', ''))
-    const disk = JSON.parse(readFileSync(configPath, 'utf8'))
+    const { closed: _, ...disk } = JSON.parse(readFileSync(configPath, 'utf8'))
     writeAtomic(configPath, JSON.stringify({ ...disk, allow: next }, null, 2) + '\n')
     useAllow(next)
     answer({ ok: true, allow: next })
@@ -407,34 +526,109 @@ async function reloadConfig() {
     const next = [...new Set(await resolveAll(entries))]
     // Usernames are saved as the account ids they pointed to just now.
     if (entries.some((e) => !ID.test(e))) writeAtomic(configPath, JSON.stringify({ ...disk, allow: next }, null, 2) + '\n')
-    useAllow(next)
+    useAllow(next, disk.closed === true)
   } catch (e) {
     console.warn(`config.json allowlist not used, keeping the current one: ${(e as Error).message}`)
   }
 }
+/** No allowlist and not closed: anyone can reach the bot. */
+function open() {
+  return !config.allow.length && !config.closed
+}
 /** Someone the bot talks to (everyone, without an allowlist). */
-const allowed = (id: string) => !config.allow.length || id === me0 || config.allow.includes(id)
-/** A chat the bot is in for someone allowed: a DM with them, or a group one of them owns (they're who adds members). */
-const chatAllowed = (chat: string) => {
+function allowed(id: string) {
+  return open() || id === fog.getState().me?.id || config.allow.includes(id)
+}
+/** A group's current members (not those who left). */
+const current = (g: { members: string[]; gone?: string[] }) => g.members.filter((m) => !g.gone?.includes(m))
+/**
+ * A chat the bot is in for someone allowed: a DM with them, or a group one of them owns in which every
+ * current member is allowed. Everything the bot posts in a group is encrypted to every member, so it takes
+ * part only while nobody in it is off the list; if the owner adds someone who isn't, it goes quiet there.
+ */
+function chatAllowed(chat: string) {
   const c = fog.getState().chats[chat]
-  return !config.allow.length || (!!c && !fog.isLocalChat(chat) && (c.group ? allowed(c.group.owner) : allowed(chat)))
+  return open() || (!!c && !fog.isLocalChat(chat) && (c.group ? allowed(c.group.owner) && current(c.group).every(allowed) : allowed(chat)))
+}
+/** An allowed chat the bot has accepted. */
+function chatShown(chat: string) {
+  return chatAllowed(chat) && !fog.getState().chats[chat]?.request
 }
 // Anyone else's request stays a request: no receipts, no profile, nothing reaches the API. And someone
 // taken off the list goes back to being one, so they stop getting receipts that show the bot is online.
-const accept = (chat: string) => {
+function accept(chat: string) {
   if (fog.isLocalChat(chat)) return
   if (!chatAllowed(chat)) return fog.unaccept(chat)
   if (config.accept === 'all' && fog.getState().chats[chat]?.request) fog.acceptRequest(chat)
 }
 /** Only events from allowed people, in chats the bot accepted for them. */
-const shown = (chat: string, from: string) => allowed(from) && chatAllowed(chat) && !fog.getState().chats[chat]?.request
+const shown = (chat: string, from: string) => allowed(from) && chatShown(chat)
+const queryOk = (q: { chat: string; from: string }) => shown(q.chat, q.from)
+
+// Chat history is capped too (oldest first), so nobody can fill the disk by writing to the bot: chats the
+// API shows keep their last 2000 messages, anything else (requests) its last 50.
+const MAX_MSGS = 2000
+const MAX_TEXT = 16 << 20
+const MAX_REQUEST_MSGS = 50
+const MAX_REQUEST_TEXT = 1 << 20
+function trim(chat: string) {
+  const c = fog.getState().chats[chat]
+  if (!c || fog.isLocalChat(chat)) return
+  const [maxN, maxText] = chatShown(chat) ? [MAX_MSGS, MAX_TEXT] : [MAX_REQUEST_MSGS, MAX_REQUEST_TEXT]
+  let n = c.messages.length
+  let text = c.messages.reduce((t, m) => t + m.text.length, 0)
+  if (n <= maxN && text <= maxText) return
+  const drop: string[] = []
+  for (const m of c.messages) {
+    if (n <= maxN && text <= maxText) break
+    drop.push(m.id)
+    n--
+    text -= m.text.length
+  }
+  fog.deleteMessages(chat, drop, false)
+}
+
+// Changes to who's allowed also replace the sealed-sender access key the bot handed out, so someone
+// taken off the list can't keep delivering (sealed) messages to it; only people still on it get the new one.
+const policy = () => (open() ? '*' : JSON.stringify([...config.allow].sort()))
+function rotateIfNarrowed(force = false) {
+  const prev = meta.get('ak-allow')
+  const now = policy()
+  const narrowed = force || (prev !== undefined && now !== '*' && (prev === '*' || (JSON.parse(prev) as string[]).some((id) => !config.allow.includes(id))))
+  if (narrowed) {
+    void fog.waitOnline().then(() => {
+      fog.rotateAccessKey()
+      console.log('Replaced the access key: people no longer on the allowlist can\'t deliver messages to the bot sealed.')
+    })
+  }
+  meta.set('ak-allow', now)
+}
+// First run with an allowlist and no record of the key it was given out under: replace it once.
+rotateIfNarrowed(meta.get('ak-allow') === undefined && !open())
+
+/** The last `chat` event per group, so only real changes (not replays or rejected updates) make a new one. */
+const lastChat = new Map<string, string>()
+/** Note how a group looks now (true if that's a change), or forget it if the API doesn't show it. */
+function noteChat(chat: string) {
+  if (!chatShown(chat)) return lastChat.delete(chat) && false
+  const key = JSON.stringify(chatInfo(chat))
+  if (lastChat.get(chat) === key) return false
+  lastChat.set(chat, key)
+  return true
+}
+for (const c of Object.values(fog.getState().chats)) if (c.group) noteChat(c.id)
+
 fog.setBotHooks({
+  // The last word on sending: nothing (messages, profile, receipts) goes to anyone off the list.
+  reach: (peer) => allowed(peer),
   message(chat, m, from) {
     accept(chat)
+    trim(chat)
     if (!shown(chat, from)) return
     emit({ type: 'message', message: message(chat, { ...m, from }) })
   },
   edited(chat, m, from) {
+    trim(chat)
     if (!shown(chat, from)) return
     emit({ type: 'edited', message: message(chat, { ...m, from }) })
   },
@@ -456,18 +650,25 @@ fog.setBotHooks({
     queries.set(e.q, { chat: e.chat, from: e.from, at: Date.now() })
     emit({ type: 'autocomplete', query_id: e.q, chat: chatInfo(e.chat), from: user(e.from), command: e.cmd, option: e.opt, value: e.val, args: e.args })
   },
+  // Called for every group update or leave anyone sends, even ones that were rejected: an event only
+  // when what the API shows of the group really changed.
   group(chat) {
+    const was = lastChat.has(chat)
     accept(chat)
-    if (!chatAllowed(chat) || fog.getState().chats[chat]?.request) return
-    emit({ type: 'chat', chat: chatInfo(chat) })
+    if (noteChat(chat)) emit({ type: 'chat', chat: chatInfo(chat) })
+    const g = fog.getState().chats[chat]?.group
+    if (was && !lastChat.has(chat) && g && !g.left && allowed(g.owner))
+      console.warn(`${fog.chatTitle(fog.getState().chats[chat])} (${chat}): someone not on the allowlist is in it now, so the bot takes no part there until they leave or are added.`)
   },
   thread(chat, t, from, created) {
     if (!shown(chat, from)) return
     emit({ type: 'thread', chat: chatInfo(chat), thread: thread(chat, t.id), from: user(from), created })
   },
 })
-// Requests that arrived while the bot was stopped.
+// Requests that arrived while the bot was stopped, and whatever's waiting for the API that the allowlist
+// no longer lets through (it was changed while the bot was stopped).
 for (const c of Object.values(fog.getState().chats)) accept(c.id)
+purgeEvents()
 
 // ---------- run: the API ----------
 let TOKEN = token()
@@ -483,12 +684,19 @@ class HttpError extends Error {
 const bad = (code: string, message?: string) => new HttpError(400, code, message)
 const json = (v: unknown, status = 200) => Response.json(v, { status })
 
-/** A chat by account id, group id, @username or invite link. A person we've never talked to gets a new chat. */
-async function resolveChat(raw: string, create = false) {
+/**
+ * A chat by account id, group id, @username or invite link. A person we've never talked to gets a new chat.
+ * `anyGroup`: also a group that has someone off the allowlist in it (to leave it, or remove them).
+ */
+async function resolveChat(raw: string, create = false, anyGroup = false) {
   const id = decodeURIComponent(raw)
   const chats = fog.getState().chats
   const notAllowed = () => new HttpError(403, 'not_allowed', 'not on the bot\'s allowlist (see `fog-bot allow`)')
   if (chats[id]) {
+    const g = chats[id].group
+    if (g && anyGroup) return id
+    if (g && !chatAllowed(id) && allowed(g.owner))
+      throw new HttpError(403, 'not_allowed', 'this group has members who aren\'t on the bot\'s allowlist, and everything the bot posts in a group reaches every member, so it takes no part until they leave or are added (see `fog-bot allow`)')
     if (!chatAllowed(id)) throw notAllowed()
     return id
   }
@@ -566,6 +774,7 @@ async function send(chat: string, b: Body) {
   if (!text && !atts.length && !b.poll) throw bad('empty_message')
   // In a DM everything is already only for them.
   if (!fog.getState().chats[chat]?.group) delete b.only_to
+  if (b.only_to !== undefined && !allowed(String(b.only_to))) throw new HttpError(403, 'not_allowed', 'only_to must be on the bot\'s allowlist')
   if (b.thread_id && !fog.getState().chats[chat]?.threads?.[b.thread_id]) throw new HttpError(404, 'thread_not_found')
   const opts: import('../web/src/fog').SendOpts = {
     reply: b.reply_to,
@@ -617,8 +826,13 @@ async function upload(req: Request, url: URL) {
     dur: num('duration'),
     wave: q('waveform')?.split(',').map(Number).slice(0, 100),
   }
-  await media.storeLocal(att.lid, new Blob([data], { type: mime }))
-  return json({ file: file(att) })
+  uploading.add(att.lid)
+  try {
+    await media.storeLocal(att.lid, new Blob([data], { type: mime }))
+  } finally {
+    uploading.delete(att.lid)
+  }
+  return json({ file: file(att, null, me0) })
 }
 
 async function download(id: string) {
@@ -642,7 +856,15 @@ async function events(url: URL) {
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 100) || 100, 1), 500)
   // Asking from an offset confirms everything before it.
   if (offset > 0) store.db.run('DELETE FROM events WHERE seq < ?', [offset])
-  const read = () => store.db.query<{ seq: number; ev: string }, [number, number]>('SELECT seq, ev FROM events WHERE seq >= ? ORDER BY seq LIMIT ?').all(offset, limit)
+  // Checked against the allowlist as it is now: events from someone taken off it since are dropped.
+  const read = () => {
+    for (;;) {
+      const rows = store.db.query<{ seq: number; ev: string }, [number, number]>('SELECT seq, ev FROM events WHERE seq >= ? ORDER BY seq LIMIT ?').all(offset, limit)
+      const bad = rows.filter((r) => !evOk(JSON.parse(r.ev)))
+      if (!bad.length) return rows
+      for (const r of bad) store.db.run('DELETE FROM events WHERE seq = ?', [r.seq])
+    }
+  }
   let rows = read()
   if (!rows.length && timeout) {
     await new Promise<void>((res) => {
@@ -699,8 +921,12 @@ const routes: Route[] = [
     () =>
       json({
         chats: Object.values(fog.getState().chats)
-          .filter((c) => !fog.isLocalChat(c.id) && chatAllowed(c.id) && !c.request)
-          .map((c) => ({ ...chatInfo(c.id), unread: c.unread, last: c.messages.at(-1)?.ts ?? null })),
+          .filter((c) => !fog.isLocalChat(c.id) && chatShown(c.id))
+          .map((c) => {
+            // From the messages the API shows only.
+            const recent = c.unread ? c.messages.slice(-c.unread).filter((m) => !m.mine && !m.sys && visible(c.id, m)).length : 0
+            return { ...chatInfo(c.id), unread: recent, last: c.messages.findLast((m) => visible(c.id, m))?.ts ?? null }
+          }),
       }),
   ],
   ['GET', /^\/v1\/chats\/([^/]+)$/, async (_r, _u, [c]) => json(chatInfo(await resolveChat(c)))],
@@ -710,7 +936,7 @@ const routes: Route[] = [
     async (_r, url, [c]) => {
       const chat = await resolveChat(c)
       const tid = url.searchParams.get('thread_id')
-      const all = fog.getState().chats[chat].messages.filter((m) => (tid ? m.th === tid : url.searchParams.has('all') || !m.th) && (m.mine || allowed(m.from ?? chat)))
+      const all = fog.getState().chats[chat].messages.filter((m) => (tid ? m.th === tid : url.searchParams.has('all') || !m.th) && visible(chat, m))
       const before = url.searchParams.get('before')
       const end = before ? all.findIndex((m) => m.id === before) : all.length
       const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 50) || 50, 1), 200)
@@ -722,9 +948,8 @@ const routes: Route[] = [
     /^\/v1\/chats\/([^/]+)\/threads$/,
     async (_r, _u, [c]) => {
       const chat = await resolveChat(c)
-      // Only threads started by people on the allowlist (or the bot); one we were caught up on, by whoever its id belongs to.
-      const starterOk = (t: { id: string; by: string }) => (t.by ? allowed(t.by) : [me0, ...config.allow].some((a) => t.id.startsWith(`${a.slice(0, 16)}.`)) || !config.allow.length)
-      return json({ threads: Object.values(fog.getState().chats[chat].threads ?? {}).filter(starterOk).map((t) => thread(chat, t.id)) })
+      // Only threads started by people on the allowlist (or the bot).
+      return json({ threads: Object.values(fog.getState().chats[chat].threads ?? {}).filter(threadOk).map((t) => thread(chat, t.id)) })
     },
   ],
   [
@@ -835,6 +1060,7 @@ const routes: Route[] = [
       const members = await Promise.all((Array.isArray(b.members) ? b.members : []).map(async (m: string) => (await fog.findPeer(String(m)).catch(() => { throw new HttpError(404, 'user_not_found', `no user ${m}`) })).id))
       if (!members.every(allowed)) throw new HttpError(403, 'not_allowed', 'every member must be on the bot\'s allowlist')
       const id = await fog.createGroup(b.name.trim().slice(0, 64), members)
+      noteChat(id)
       return json(chatInfo(id))
     },
   ],
@@ -842,7 +1068,8 @@ const routes: Route[] = [
     'PATCH',
     /^\/v1\/chats\/([^/]+)$/,
     async (req, _u, [c]) => {
-      const chat = await resolveChat(c)
+      // Also a group that has someone off the list in it, so the bot can remove them.
+      const chat = await resolveChat(c, false, true)
       const g = fog.getState().chats[chat].group
       if (!g) throw bad('not_a_group')
       if (g.owner !== fog.getState().me!.id) throw new HttpError(403, 'not_owner', 'only the group owner can change it')
@@ -851,6 +1078,8 @@ const routes: Route[] = [
       const add = await ids(b.add)
       if (add && !add.every(allowed)) throw new HttpError(403, 'not_allowed', 'new members must be on the bot\'s allowlist')
       await fog.updateGroup(chat, { name: typeof b.name === 'string' ? b.name.slice(0, 64) : undefined, add, remove: await ids(b.remove) })
+      accept(chat)
+      noteChat(chat)
       return json(chatInfo(chat))
     },
   ],
@@ -858,7 +1087,7 @@ const routes: Route[] = [
     'POST',
     /^\/v1\/chats\/([^/]+)\/leave$/,
     async (_r, _u, [c]) => {
-      await fog.leaveGroup(await resolveChat(c))
+      await fog.leaveGroup(await resolveChat(c, false, true))
       return json({ ok: true })
     },
   ],
@@ -885,7 +1114,7 @@ const routes: Route[] = [
     /^\/v1\/buttons\/([^/]+)\/answer$/,
     async (req, _u, [qid]) => {
       const q = queries.get(qid)
-      if (!q) throw new HttpError(404, 'query_not_found', 'unknown or expired query (answer within 15 minutes)')
+      if (!q || !queryOk(q)) throw new HttpError(404, 'query_not_found', 'unknown or expired query (answer within 15 minutes)')
       const b = await body(req)
       const form = b.form ? { id: String(b.form.id), title: String(b.form.title ?? ''), f: (b.form.fields ?? []).map((f: any) => ({ id: String(f.id), l: String(f.label ?? f.id), ph: f.placeholder, long: !!f.multiline, secret: !!f.secret, req: !!f.required, min: f.min_length, max: f.max_length })) } : undefined
       queries.delete(qid)
@@ -898,7 +1127,7 @@ const routes: Route[] = [
     /^\/v1\/autocomplete\/([^/]+)\/answer$/,
     async (req, _u, [qid]) => {
       const q = queries.get(qid)
-      if (!q) throw new HttpError(404, 'query_not_found')
+      if (!q || !queryOk(q)) throw new HttpError(404, 'query_not_found')
       const b = await body(req)
       queries.delete(qid)
       await fog.answerSuggest(q.chat, q.from, qid, (Array.isArray(b.choices) ? b.choices : []).map((x: any) => ({ l: String(x.label ?? x.value), v: String(x.value) })))
@@ -913,6 +1142,7 @@ const timingSafe = (a: string, b: string) => a.length === b.length && crypto.tim
 const server = Bun.serve({
   hostname: config.host,
   port: config.port,
+  tls,
   maxRequestBodySize: media.MAX_FILE + 1024 * 1024,
   idleTimeout: 255, // long polls and big uploads
   async fetch(req) {
@@ -935,7 +1165,8 @@ const server = Bun.serve({
 })
 const me = fog.getState().me!
 console.log(`fog-bot ${VERSION}: ${me.username ? '@' + me.username : me.id} on ${config.server}`)
-console.log(`API on http://${server.hostname}:${server.port} (token in ${tokenPath})`)
+console.log(`API on ${tls ? 'https' : 'http'}://${server.hostname}:${server.port} (token in ${tokenPath})`)
 if (config.allow.length) console.log(`Talks only to ${config.allow.length} ${config.allow.length === 1 ? 'person' : 'people'} on its allowlist (fog-bot allow).`)
+else if (config.closed) console.warn(CLOSED)
 else console.warn('Anyone can message this bot. To keep it to yourself: fog-bot allow --add @you')
-if (config.host !== '127.0.0.1' && config.host !== 'localhost' && config.host !== '::1') console.warn('Warning: the API is reachable from other machines. Anyone with the token can read and send as this bot.')
+if (!loopback) console.warn('Warning: the API is reachable from other machines (over HTTPS). Anyone with the token can read and send as this bot.')

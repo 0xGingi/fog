@@ -1,5 +1,5 @@
 // Message rendering: bubbles, attachments (photo, video, voice, audio, any file), viewers.
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as fog from './fog'
 import { attLabel, chatTitle, msgStatus, personName, timerLabel, useFog, type Chat, type LinkPreview, type Msg } from './fog'
 import { fmtDur as dur } from './media'
@@ -17,7 +17,9 @@ export function dayLabel(ts: number) {
   return new Date(ts).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long', year: new Date(ts).getFullYear() === new Date().getFullYear() ? undefined : 'numeric' })
 }
 const plain = (t: string) => t.replace(/```/g, '').replace(/(^|[^\p{L}\p{N}])([*_~`])(\S(?:.*?\S)?)\2(?![\p{L}\p{N}])/gu, '$1$3')
-const flat = (m: Msg) => (m.md ? mdPlain(m.text) : plain(m.text)).replace(/\s*\n\s*/g, ' ')
+// Previews show a line or three, so only the start is cleaned up: the patterns above aren't linear on
+// a hostile 64 KB message, and the chat list renders this for every chat.
+const flat = (m: Msg) => (m.md ? mdPlain(m.text.slice(0, 600)) : plain(m.text.slice(0, 600))).replace(/\s*\n\s*/g, ' ')
 export const snippet = (m: Msg) => (m.sys ? sysText(m) : m.poll ? `📊 ${m.poll.q}` : m.att ? (m.text ? `${attLabel(m.att).split(' ')[0]} ${flat(m)}` : attLabel(m.att)) : flat(m))
 
 export function sysText(m: Msg) {
@@ -69,7 +71,7 @@ function inline(s: string, key: string): ReactNode[] {
     else if (m[5]) out.push(<span key={k} className="mention">{t}</span>)
     else
       out.push(
-        <a key={k} href={t} target="_blank" rel="noopener noreferrer" className="[overflow-wrap:anywhere] underline decoration-current/40 underline-offset-2 hover:decoration-current" onClick={(e) => e.stopPropagation()}>
+        <a key={k} href={t} target="_blank" rel="noopener noreferrer" className="[overflow-wrap:anywhere] underline decoration-current/40 underline-offset-2 hover:decoration-current" onClick={(e) => fog.externalClick(e, t)}>
           {t}
         </a>,
       )
@@ -104,10 +106,13 @@ export function Ticks({ status, read = 'text-lamp' }: { status?: Msg['status']; 
     )
   if (status === 'failed') return <span className="font-bold text-danger" aria-label="Not sent">!</span>
   const two = status === 'delivered' || status === 'read'
+  // Read stands out by more than colour: sent/delivered ticks are dimmed, read ones full strength and bolder.
+  const isRead = status === 'read'
+  const w = isRead ? '2' : '1.6'
   return (
-    <svg viewBox="0 0 20 14" className={`h-3.5 w-5 ${status === 'read' ? read : ''}`} aria-label={status}>
-      <path d="M1.5 7.5l3.5 3.5L12 4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-      {two && <path d="M7.5 10.5l.5.5L15 4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />}
+    <svg viewBox="0 0 20 14" className={`h-3.5 w-5 ${isRead ? read : 'opacity-55'}`} aria-label={status}>
+      <path d="M1.5 7.5l3.5 3.5L12 4" fill="none" stroke="currentColor" strokeWidth={w} strokeLinecap="round" strokeLinejoin="round" />
+      {two && <path d="M7.5 10.5l.5.5L15 4" fill="none" stroke="currentColor" strokeWidth={w} strokeLinecap="round" strokeLinejoin="round" />}
     </svg>
   )
 }
@@ -151,11 +156,11 @@ function Ring({ p, className = 'size-12' }: { p: number; className?: string }) {
   )
 }
 
-function MediaBox({ a, onOpen, meta, rounded }: { a: Att; onOpen: () => void; meta?: ReactNode; rounded: string }) {
+function MediaBox({ a, onOpen, meta, rounded, auto = true }: { a: Att; onOpen: () => void; meta?: ReactNode; rounded: string; auto?: boolean }) {
   const url = useLocalUrl(a.lid)
   const t = useTransfer(a.lid)
   useEffect(() => {
-    if (!url && a.kind === 'photo' && !t) download(a)
+    if (auto && !url && a.kind === 'photo' && !t) download(a)
   }, [a.lid])
   const ratio = (a.w ?? 4) / (a.h ?? 3)
   const width = Math.max(180, Math.min(340, ratio * 360, a.w ?? 340))
@@ -343,6 +348,9 @@ export function Bubble(props: BubbleProps) {
   const [dx, setDx] = useState(0)
   const swipe = useRef<{ x: number; y: number; on: boolean } | null>(null)
   const a = m.att
+  // Media fetches itself as it scrolls into view, but not in a message request (that waits for a tap)
+  // and not when it's big.
+  const auto = !chat.request && (a?.size ?? 0) < 15_000_000
   const big = (!a && !m.reply && !m.fwd && !m.link && isEmojiOnly(m.text)) || (a?.kind === 'sticker' && !m.text && !m.reply)
   const counts = new Map<string, number>()
   for (const e of Object.values(m.re ?? {})) counts.set(e, (counts.get(e) ?? 0) + 1)
@@ -439,10 +447,11 @@ export function Bubble(props: BubbleProps) {
           <div className={m.reply || m.fwd || (groupIn && !joinPrev) ? 'px-1 pt-1' : ''}>
             {groupIn && !joinPrev && <p className={`truncate px-2 pt-0.5 pb-1 text-[13.5px] font-semibold ${nameColor(m.from!)}`}>{personName(m.from!, people[m.from!])}</p>}
             {a.kind === 'videonote' ? (
-              <VideoNote a={a} meta={m.text ? undefined : meta} rounded={mediaOnly ? 'rounded-none' : `${m.reply || m.fwd || (groupIn && !joinPrev) ? 'rounded-[14px]' : 'rounded-[18px]'} ${m.text ? 'rounded-b-[6px]' : ''}`} />
+              <VideoNote a={a} auto={auto} meta={m.text ? undefined : meta} rounded={mediaOnly ? 'rounded-none' : `${m.reply || m.fwd || (groupIn && !joinPrev) ? 'rounded-[14px]' : 'rounded-[18px]'} ${m.text ? 'rounded-b-[6px]' : ''}`} />
             ) : (
               <MediaBox
                 a={a}
+                auto={auto}
                 onOpen={selecting ? onSelect : onOpenMedia}
                 meta={m.text ? undefined : meta}
                 rounded={mediaOnly ? 'rounded-none' : `${m.reply || m.fwd || (groupIn && !joinPrev) ? 'rounded-[14px]' : 'rounded-[18px]'} ${m.text ? 'rounded-b-[6px]' : ''}`}
@@ -457,7 +466,7 @@ export function Bubble(props: BubbleProps) {
         {a?.kind === 'file' && <FileCard a={a} mine={m.mine} onOpen={selecting ? onSelect : openFile} />}
         {big ? (
           <div className="px-1">
-            {a?.kind === 'sticker' ? <Sticker a={a} /> : <p className="text-[44px] leading-[1.15]">{m.text}</p>}
+            {a?.kind === 'sticker' ? <Sticker a={a} auto={auto} /> : <p className="text-[44px] leading-[1.15]">{m.text}</p>}
             <div className="mt-0.5 flex justify-end">
               <span className="rounded-full bg-black/25 px-2 py-0.5 backdrop-blur-sm [&_*]:!text-white">{meta}</span>
             </div>
@@ -633,7 +642,7 @@ function LinkCard({ l, mine }: { l: LinkPreview; mine: boolean }) {
       href={l.url}
       target="_blank"
       rel="noopener noreferrer"
-      onClick={(e) => e.stopPropagation()}
+      onClick={(e) => fog.externalClick(e, l.url)}
       className={`mx-1.5 mt-1.5 flex min-w-[min(300px,68vw)] overflow-hidden rounded-[10px] transition hover:brightness-95 ${mine ? 'bg-black/[0.08]' : 'bg-lamp/10'}`}
     >
       <span className={`w-[3px] shrink-0 ${mine ? 'bg-out-accent' : 'bg-lamp'}`} />
@@ -647,11 +656,11 @@ function LinkCard({ l, mine }: { l: LinkPreview; mine: boolean }) {
   )
 }
 
-export function Sticker({ a, size = 180 }: { a: Att; size?: number }) {
+export function Sticker({ a, size = 180, auto = true }: { a: Att; size?: number; auto?: boolean }) {
   const url = useLocalUrl(a.lid)
   const t = useTransfer(a.lid)
   useEffect(() => {
-    if (!url && !t) download(a)
+    if (auto && !url && !t) download(a)
   }, [a.lid])
   const ratio = (a.w ?? 1) / (a.h ?? 1)
   return (
@@ -662,14 +671,14 @@ export function Sticker({ a, size = 180 }: { a: Att; size?: number }) {
 }
 
 /** Video message: plays muted inline like WhatsApp; tap for sound with a progress bar. */
-function VideoNote({ a, meta, rounded }: { a: Att; meta?: ReactNode; rounded: string }) {
+function VideoNote({ a, meta, rounded, auto }: { a: Att; meta?: ReactNode; rounded: string; auto: boolean }) {
   const url = useLocalUrl(a.lid)
   const t = useTransfer(a.lid)
   const v = useRef<HTMLVideoElement>(null)
   const [playing, setPlaying] = useState(false)
   const [p, setP] = useState(0)
   useEffect(() => {
-    if (!url && !t) download(a)
+    if (auto && !url && !t) download(a)
   }, [a.lid])
   const reset = (el: HTMLVideoElement) => {
     el.muted = true
@@ -680,7 +689,7 @@ function VideoNote({ a, meta, rounded }: { a: Att; meta?: ReactNode; rounded: st
   const toggle = (e: React.MouseEvent) => {
     e.stopPropagation()
     const el = v.current
-    if (!el) return
+    if (!el) return void (!url && !t && download(a))
     if (playing) return reset(el)
     el.currentTime = 0
     el.muted = false
@@ -1013,6 +1022,8 @@ function VideoPlayer({ src, chrome, setChrome, caption, poke, onFrame }: { src: 
   )
 }
 
+/** The viewer builds a row per line, so a file of nothing but line breaks stops here; the rest is a save away. */
+const VIEW_LINES = 5000
 /** Plain-text preview for text and code files. Always rendered as text, never as markup. */
 export function TextViewer({ a, onClose }: { a: Att; onClose: () => void }) {
   const [text, setText] = useState<string | null>(null)
@@ -1020,7 +1031,8 @@ export function TextViewer({ a, onClose }: { a: Att; onClose: () => void }) {
   useEffect(() => {
     download(a).then(async (u) => {
       const blob = u && (await localBlob(a.lid))
-      setText(blob ? await blob.text() : '')
+      // The size in the message is the sender's word; read no more than a text file may be.
+      setText(blob ? await blob.slice(0, 2_000_000).text() : '')
     })
   }, [a.lid])
   useEffect(() => {
@@ -1028,7 +1040,8 @@ export function TextViewer({ a, onClose }: { a: Att; onClose: () => void }) {
     window.addEventListener('keydown', key, true)
     return () => window.removeEventListener('keydown', key, true)
   }, [onClose])
-  const lines = text?.split('\n') ?? []
+  const all = useMemo(() => text?.split('\n') ?? [], [text])
+  const lines = all.length > VIEW_LINES ? all.slice(0, VIEW_LINES) : all
   return (
     <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-scrim p-0 sm:p-6" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
       <div role="dialog" aria-label={a.name} className="pop flex h-full w-full max-w-4xl flex-col overflow-hidden bg-panel shadow-2xl sm:h-[85vh] sm:rounded-3xl">
@@ -1038,7 +1051,7 @@ export function TextViewer({ a, onClose }: { a: Att; onClose: () => void }) {
             <p className="truncate font-semibold">{a.name}</p>
             <p className="text-xs text-muted">
               {fmtSize(a.size)}
-              {text !== null && ` · ${lines.length} lines`}
+              {text !== null && ` · ${all.length} lines`}
             </p>
           </div>
           <button onClick={() => text !== null && copy(text, 'File contents copied')} aria-label="Copy contents" title="Copy" className="grid size-10 place-items-center rounded-full text-muted hover:bg-hover hover:text-ink">
@@ -1062,6 +1075,7 @@ export function TextViewer({ a, onClose }: { a: Att; onClose: () => void }) {
                   <span className="pr-6 pl-3 whitespace-pre">{l || ' '}</span>
                 </div>
               ))}
+              {lines.length < all.length && <div className="sticky left-0 px-4 pt-3 font-sans text-sm text-muted">Showing the first {VIEW_LINES.toLocaleString()} lines. Save the file to see the rest.</div>}
             </pre>
           )}
         </div>

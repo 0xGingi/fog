@@ -20,6 +20,9 @@ Then open the invite link it printed (or search for `@my_agent` in Fog) and say 
 - `--server URL`: another Fog server (default `https://getfog.org`). Saved by `init`.
 - `--dir DIR`: where the bot keeps its keys and messages (default `$FOG_BOT_DIR` or `~/.fog-bot`). One folder per bot. Keep it private: it holds the account's keys.
 - `--port`, `--host`: where the API listens (default `127.0.0.1:8790`). It only listens on this machine unless you change `--host`.
+  The token gives full control of the account, so beyond this machine the API is HTTPS only: `--tls-cert cert.pem --tls-key key.pem`
+  (also `tlsCert`/`tlsKey` in `config.json`). fog-bot refuses to start on a non-loopback `--host` without them. Or keep it on
+  `127.0.0.1` and reach it through a TLS reverse proxy on the same machine or an SSH tunnel (`ssh -L 8790:127.0.0.1:8790 bot-host`).
 - `--accept all|none`: accept message requests and group invites automatically (default `all`, but only from people on the allowlist when there is one).
 - `fog-bot init --restore` reads a recovery phrase from stdin to bring an account back.
 - `fog-bot token [--rotate]` prints (or replaces) the API token. `fog-bot info` prints the account id and invite link.
@@ -30,8 +33,14 @@ With an allowlist, the bot only exists for the people on it. Everyone else:
 
 - stays an unanswered message request: no delivery or read receipts, and they never get the bot's name, photo or commands;
 - never appears in the API: no events, chats or history, and the bot can't write to them (`403 not_allowed`);
-- can't add the bot to a group. The bot joins only groups owned by someone on the list, and even there it
-  only hears people on the list (other members' messages don't reach the API or its history).
+- can't add the bot to a group, or be in one with it. The bot takes part only in groups owned by someone on the
+  list in which **every** member is on the list. Everything the bot posts in a group is encrypted to every member,
+  so if the owner adds someone who isn't on the list, the bot goes quiet there: the group drops out of
+  `GET /v1/chats` and events, the newcomer gets no receipts or profile, and posting answers `403 not_allowed`
+  ("this group has members who aren't on the bot's allowlist"). It comes back by itself once they leave, are
+  removed, or are added to the list. The bot can still leave such a group, or remove them if it owns it.
+- never shows up inside other people's messages either: replies to them keep only the message id, their reactions,
+  thread names and mentions are left out, and the API never gives their name (only their public @username).
 
 ```sh
 fog-bot init … --owner @you        # set it when creating the bot
@@ -41,8 +50,15 @@ fog-bot run --allow @you,@partner  # or set it when starting
 ```
 
 Taking someone off the list (it takes effect within a second, even while `fog-bot run` is running) puts
-their chat back to an unanswered request, so they stop getting receipts too. Usernames are looked up once,
+their chat back to an unanswered request, so they stop getting receipts too. Events of theirs still waiting
+in `/v1/events` are dropped, their files are no longer served (`404`), their pending taps can't be answered, and
+the bot replaces the sealed-sender access key it shared, so they can't keep delivering messages to it sealed
+(people still on the list get the new key). Usernames are looked up once,
 when you add them, and saved as account ids, so the server can't later change who a name points to. With no allowlist, anyone can message the bot (it says so when it starts).
+
+If `init --owner` can't find that account, `init` still prints the recovery phrase but fails, and the bot stays
+**closed**: nobody can reach it until you set the list with `fog-bot allow --add @you` (`fog-bot allow --clear`
+opens it to everyone on purpose).
 
 Build a single binary with `bun build --compile bot/main.ts --outfile fog-bot` from the repo root, after
 `bun install && bun run core` in `web/` (which builds the crypto core; see Local Development in the main
@@ -89,7 +105,9 @@ mentions the bot, so `mentions_me` is true.
 `GET /v1/events?offset=N&timeout=30&limit=100` long-polls for events, oldest first, answering
 `{events, next}`. Each event has a `seq` and a `date` (ms). Ask again with `offset` = `next`, which also
 confirms (deletes) everything before it. Events wait up to a week for you, so nothing is lost while your
-bot restarts. `offset=-1` drops whatever is waiting and answers just `next`, to start from now.
+bot restarts. `offset=-1` drops whatever is waiting and answers just `next`, to start from now. So that nobody
+can fill the bot's disk by writing to it, at most 10,000 events (64 MB) wait, 1,000 per sender; past that the
+oldest are dropped. Chat history keeps the last 2,000 messages of each chat.
 
 | `type` | fields |
 |---|---|
@@ -99,7 +117,7 @@ bot restarts. `offset=-1` drops whatever is waiting and answers just `next`, to 
 | `reaction` | `chat`, `message_id`, `from`, `emoji` (`null`: removed) |
 | `button` | `query_id`, `chat`, `message_id`, `from`, `data`, plus `values` (dropdown) or `fields` (form) |
 | `autocomplete` | `query_id`, `chat`, `from`, `command`, `option`, `value` (the word being typed), `args` (everything after the command) |
-| `chat` | `chat`: a group was created, changed, or someone left |
+| `chat` | `chat`: a group was created, changed, or someone left (only when what the API shows of it changed) |
 | `thread` | `chat`, `thread`, `from`, `created` (false: renamed) |
 
 `deleted`, `reaction` and `button` events also carry `thread` when the message is in one.
@@ -208,8 +226,8 @@ Answer within 15 minutes:
 | `GET /v1/chats` | Every chat: `{id, type, title, members?, owner?, pinned?, unread, last}` |
 | `GET /v1/chats/{chat}` | One chat, with group members (`User` + `is_bot`) and owner |
 | `POST /v1/groups` | `{name, members: [id or @username]}` creates a group the bot owns |
-| `PATCH /v1/chats/{chat}` | `{name?, add?, remove?}` (groups the bot owns) |
-| `POST /v1/chats/{chat}/leave` | Leave a group |
+| `PATCH /v1/chats/{chat}` | `{name?, add?, remove?}` (groups the bot owns; `add` only people on the allowlist) |
+| `POST /v1/chats/{chat}/leave` | Leave a group (also one that has someone off the allowlist in it) |
 | `GET /v1/users/{id or @username}` | `User` |
 | `POST /v1/users/{id}/block` | Block someone |
 

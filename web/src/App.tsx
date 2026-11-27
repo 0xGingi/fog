@@ -418,7 +418,7 @@ function RestoreStep({ onBack }: { onBack: () => void }) {
 /** New device: show a code for the main device to scan, then receive the account and chat history. */
 function LinkStep({ onBack }: { onBack: () => void }) {
   const [code, setCode] = useState<string | null>(null)
-  const [step, setStep] = useState<'waiting' | 'confirm' | 'linking' | 'history'>('waiting')
+  const [step, setStep] = useState<'waiting' | 'confirm' | 'approve' | 'linking' | 'history'>('waiting')
   const [check, setCheck] = useState<{ code: string; answer: (ok: boolean) => void } | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
@@ -460,7 +460,7 @@ function LinkStep({ onBack }: { onBack: () => void }) {
       </div>
       {step !== 'waiting' && !err && (
         <p role="status" className="mt-4 text-center font-medium">
-          {step === 'linking' ? 'Setting up this device…' : 'Copying your chats…'}
+          {step === 'approve' ? 'Now confirm the code on your main device…' : step === 'linking' ? 'Setting up this device…' : 'Copying your chats…'}
         </p>
       )}
       {step === 'waiting' && code && !err && (
@@ -584,33 +584,49 @@ function useBackButton() {
 }
 
 /**
- * Phones: swipe right from the left edge of a chat to go back to the chat list, the chat following
- * the finger with the list showing underneath (iOS has no Back gesture of its own in the app).
+ * Phones: swipe right on a chat to go back to the chat list, the chat following the finger with the list
+ * showing underneath (iOS has no Back gesture of its own in the app; Android's system Back also works,
+ * through useBackButton). Starts anywhere in the chat, except in a text box or something that scrolls
+ * sideways and isn't at its start, and only for a clearly sideways drag, so vertical scrolling is untouched.
  */
 function useSwipeBack(main: React.RefObject<HTMLElement | null>, active: string | null, setPeek: (on: boolean) => void) {
   useEffect(() => {
     const el = main.current
     if (!el || !active || !matchMedia('(max-width: 767px)').matches) return
-    let x0 = 0, y0 = 0, dx = 0, vx = 0, last = 0
+    // Sideways drags are ours, not the browser's (vertical scrolling stays native, and so does
+    // sideways scrolling inside a code block or table, which is its own scroll container).
+    el.style.touchAction = 'pan-y'
+    let x0 = 0, y0 = 0, dx = 0, vx = 0, last = 0, edge = false
     let on: boolean | null = false // null: deciding, true: swiping
+    const blocked = (t: EventTarget | null) => {
+      for (let n = t as HTMLElement | null; n && n !== el; n = n.parentElement) {
+        if (n.matches('input,textarea,select,[contenteditable=true],.touch-none')) return true
+        if (n.scrollWidth > n.clientWidth + 1 && n.scrollLeft > 0 && getComputedStyle(n).overflowX !== 'visible') return true
+      }
+      return false
+    }
     const start = (e: TouchEvent) => {
       const t = e.touches[0]
-      const edge = e.touches.length === 1 && t.clientX < 28 && !document.querySelector('[role=menu],[role=dialog],[data-drawer]')
-      on = edge ? null : false
+      const ok = e.touches.length === 1 && !document.querySelector('[role=menu],[role=dialog],[data-drawer]') && !blocked(e.target)
+      on = ok ? null : false
+      edge = t.clientX < 32
       x0 = t.clientX; y0 = t.clientY; dx = 0; vx = 0; last = e.timeStamp
     }
     const move = (e: TouchEvent) => {
       if (on === false) return
       const t = e.touches[0]
       const x = Math.max(0, t.clientX - x0)
+      const dy = Math.abs(t.clientY - y0)
       if (on === null) {
-        if (x < 10 && Math.abs(t.clientY - y0) < 10) return
-        on = x > Math.abs(t.clientY - y0)
+        // From the very edge, claim the touch at once, before iOS can start scrolling the messages.
+        if (edge && e.cancelable) e.preventDefault()
+        if (x < 10 && dy < 10) return
+        on = edge ? x > dy : x > dy * 1.5
         if (!on) return
         setPeek(true)
         el.style.transition = 'none'
       }
-      e.preventDefault()
+      if (e.cancelable) e.preventDefault()
       vx = (x - dx) / Math.max(1, e.timeStamp - last)
       dx = x; last = e.timeStamp
       el.style.transform = `translateX(${dx}px)`
@@ -618,7 +634,7 @@ function useSwipeBack(main: React.RefObject<HTMLElement | null>, active: string 
     const end = () => {
       if (!on) return void (on = false)
       on = false
-      const back = dx > el.offsetWidth / 3 || (vx > 0.4 && dx > 40)
+      const back = dx > el.offsetWidth / 3 || (vx > 0.35 && dx > 40)
       el.style.transition = 'transform 180ms ease-out'
       el.style.transform = `translateX(${back ? el.offsetWidth : 0}px)`
       setTimeout(() => {
@@ -627,15 +643,17 @@ function useSwipeBack(main: React.RefObject<HTMLElement | null>, active: string 
         setPeek(false)
       }, 180)
     }
-    el.addEventListener('touchstart', start, { passive: true })
-    el.addEventListener('touchmove', move, { passive: false })
-    el.addEventListener('touchend', end)
-    el.addEventListener('touchcancel', end)
+    const opts = { capture: true, passive: false }
+    el.addEventListener('touchstart', start, { capture: true, passive: true })
+    el.addEventListener('touchmove', move, opts)
+    el.addEventListener('touchend', end, true)
+    el.addEventListener('touchcancel', end, true)
     return () => {
-      el.removeEventListener('touchstart', start)
-      el.removeEventListener('touchmove', move)
-      el.removeEventListener('touchend', end)
-      el.removeEventListener('touchcancel', end)
+      el.style.touchAction = ''
+      el.removeEventListener('touchstart', start, true)
+      el.removeEventListener('touchmove', move, true)
+      el.removeEventListener('touchend', end, true)
+      el.removeEventListener('touchcancel', end, true)
     }
   }, [active])
 }
@@ -1584,16 +1602,20 @@ const linkError = (e: string) =>
     timeout: "The other device didn't finish setting up. Check it's online and try again.",
     main_only: 'Only your main device can link devices.',
     bad_code: "That isn't a Fog link code.",
+    old_code: 'Update Fog on the new device, then show a new code.',
+    cancelled: 'Linking cancelled. Nothing was sent.',
   })[e] ?? "Couldn't link that device. Check your connection and try again."
 
 /** Main device: scan (or paste) the new device's code, send it the account and chat history. */
 function LinkDeviceDialog({ onClose }: { onClose: () => void }) {
-  const [step, setStep] = useState<'scan' | 'confirm' | 'sending' | 'waiting' | 'done'>('scan')
+  const [step, setStep] = useState<'scan' | 'confirm' | 'hello' | 'check' | 'sending' | 'waiting' | 'done'>('scan')
   const [err, setErr] = useState<string | null>(null)
   const [paste, setPaste] = useState('')
   const [typing, setTyping] = useState(false)
   const [pending, setPending] = useState('')
-  const [check, setCheck] = useState('')
+  const [check, setCheck] = useState<{ code: string; answer: (ok: boolean) => void } | null>(null)
+  // Closing the dialog mid-check counts as "doesn't match", so nothing is sent.
+  useEffect(() => () => check?.answer(false), [check])
   const scanned = async (code: string): Promise<string | null> => {
     setErr(null)
     if (!fog.parseLinkCode(code)) return (setErr(linkError('bad_code')), linkError('bad_code'))
@@ -1602,9 +1624,9 @@ function LinkDeviceDialog({ onClose }: { onClose: () => void }) {
     return null
   }
   const run = async (code: string) => {
-    setStep('sending')
+    setStep('hello')
     try {
-      await fog.linkDevice(code, (s, c) => (setStep(s), c && setCheck(c)))
+      await fog.linkDevice(code, setStep, (c) => new Promise<boolean>((answer) => (setCheck({ code: c, answer }), setStep('check'))))
       setStep('done')
       return null
     } catch (e) {
@@ -1614,7 +1636,25 @@ function LinkDeviceDialog({ onClose }: { onClose: () => void }) {
       return m
     }
   }
-  const busy = step === 'sending' || step === 'waiting'
+  const busy = step === 'hello' || step === 'sending' || step === 'waiting'
+  if (step === 'check' && check)
+    return (
+      <Dialog
+        title="Check the code"
+        onClose={() => check.answer(false)}
+        actions={
+          <>
+            <Button kind="ghost" onClick={() => check.answer(false)}>
+              It doesn't match
+            </Button>
+            <Button onClick={() => check.answer(true)}>It matches</Button>
+          </>
+        }
+      >
+        <p>The new device should be showing this code. Only continue if it's on a device in front of you. Nothing has been sent yet.</p>
+        <p className="mt-4 text-center font-mono text-3xl font-semibold tracking-wider text-ink tabular-nums">{check.code}</p>
+      </Dialog>
+    )
   if (step === 'confirm')
     return (
       <Dialog
@@ -1683,9 +1723,8 @@ function LinkDeviceDialog({ onClose }: { onClose: () => void }) {
         <div className="flex flex-col items-center py-8 text-center">
           <Spinner />
           <p role="status" className="mt-4 font-medium text-ink">
-            {step === 'sending' ? 'Sending your chats, end-to-end encrypted…' : 'On the new device, check this code matches:'}
+            {step === 'hello' ? 'Connecting to the new device…' : step === 'sending' ? 'Sending your chats, end-to-end encrypted…' : 'Finishing up on the new device…'}
           </p>
-          {step === 'waiting' && check && <p className="mt-3 font-mono text-3xl font-semibold tracking-wider text-ink tabular-nums">{check}</p>}
         </div>
       )}
       {step === 'done' && <p>Your new device is ready. Messages now arrive on all your devices.</p>}

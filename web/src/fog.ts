@@ -109,7 +109,7 @@ export type Chat = {
   /** From someone we haven't accepted yet: no receipts, no ringing, no notifications. */
   request?: boolean
 }
-export type Person = { username?: string | null; name?: string; avatar?: string; sent?: number; /** Their sealed-sender access key. */ ak?: string; /** Safety number confirmed in person. */ verified?: boolean; /** A bot, and what it offers. */ bot?: BotInfo }
+export type Person = { username?: string | null; name?: string; avatar?: string; sent?: number; /** Their sealed-sender access key. */ ak?: string; /** Safety number confirmed in person. */ verified?: boolean; /** A bot, and what it offers. */ bot?: BotInfo; /** Their devices the server says were unlinked (ids aren't reused): sealed messages from one are refused. */ gone?: number[] }
 export type Profile = { name: string; avatar?: string; v: number; bot?: BotInfo }
 export type Settings = { readReceipts: boolean; typing: boolean; sounds: boolean; theme: 'system' | 'light' | 'dark'; textSize: number; linkPreviews: boolean; relayCalls: boolean; autoLock: number; lockPrompted?: boolean; /** Encrypted chat backup to the server (main device; on unless turned off). */ backup?: boolean; /** Desktop app: native notifications. */ notifications?: boolean; /** Show the sender and text in notifications (off: just "New message"). */ previews?: boolean; /** Desktop layout: chat list width, or folded to an avatar rail. */ sidebar?: number; sidebarCollapsed?: boolean }
 export type State = {
@@ -180,7 +180,7 @@ type Payload = (
   | { t: 'sent'; chat: string; p: Payload }
   /** We read a chat up to `at` on another device. */
   | { t: 'read'; chat: string; at: number }
-  | { t: 'acct'; profile?: Profile; blocked?: string[]; ak?: string }
+  | { t: 'acct'; profile?: Profile; blocked?: string[]; ak?: string; /** When that key was made (older apps leave it out). */ akAt?: number }
   | { t: 'chatmeta'; chat: string; pinned?: boolean; muted?: number; archived?: boolean; accepted?: boolean; deleted?: boolean }
 ) & { g?: string; /** Sender's view of the group: version + fingerprint. */ gv?: number; gh?: string }
 
@@ -245,6 +245,8 @@ export function useFog<T>(sel: (s: State) => T): T {
   )
 }
 export const getState = () => state
+/** Outside React: run `l` after every state change. Returns the unsubscribe. */
+export const onState = (l: () => void) => (listeners.add(l), () => listeners.delete(l))
 export const toast = (text: string) => set({ toast: { text, at: Date.now() } })
 export const jumpTo = (id: string) => set({ jump: { id, at: Date.now() } })
 export const isGroup = (id: string) => id.startsWith('g:')
@@ -349,9 +351,19 @@ const savePeopleSoon = () => {
 }
 
 // ---------- desktop app ----------
-/** The desktop app's native bridge. The page may call only `notify` and `set_unread`. */
+/** The native apps' bridge (desktop and phones). The page may call only the few commands in src-tauri/src/lib.rs. */
 const desktop = (window as unknown as { __TAURI_INTERNALS__?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } }).__TAURI_INTERNALS__
 export const isDesktop = !!desktop
+/** Open a web link in a new tab, or in the native apps (which can't open windows themselves), the browser. */
+export function openExternal(url: string) {
+  if (desktop) desktop.invoke('open_url', { url }).catch(() => {})
+  else window.open(url, '_blank', 'noopener,noreferrer')
+}
+/** onClick for a plain `<a target="_blank">`: in the native apps, hand the link to the browser instead. */
+export function externalClick(e: { preventDefault(): void; stopPropagation(): void }, url: string) {
+  e.stopPropagation()
+  if (desktop) (e.preventDefault(), openExternal(url))
+}
 if (desktop) {
   // Unread count next to the menu bar icon and on the Dock icon (muted and archived chats don't count).
   let shown = -1
@@ -366,9 +378,14 @@ if (desktop) {
  * or in the background. The push itself only says "New message"; the message comes over the socket.
  */
 let pushOn = false
+/** Bumped by every registration (and logout): a phone slow to hand over a token mustn't undo a later "off". */
+let pushGen = 0
 async function registerPush() {
+  const gen = ++pushGen
   const r = (await desktop?.invoke('push_token', { on: state.settings.notifications !== false }).catch(() => null)) as { kind: string; token: string } | null | undefined
   if (!r) return // desktop and the web: no push (no token on this phone either)
+  // Superseded while we waited. The newer call sends its own answer, after this point in the socket's order.
+  if (gen !== pushGen) return
   await rpc({ t: 'push', kind: r.kind, token: r.token }).catch(() => {})
   pushOn = !!r.token
   if (pushOn) rpc({ t: 'away', away: document.hidden }).catch(() => {})
@@ -390,7 +407,7 @@ mq.addEventListener('change', applyTheme)
 applyTheme()
 
 // ---------- boot ----------
-type Meta = { username: string | null; skipped?: boolean; settings?: Partial<Settings>; profile?: Profile; blocked?: string[]; ak?: string; trust?: string }
+type Meta = { username: string | null; skipped?: boolean; settings?: Partial<Settings>; profile?: Profile; blocked?: string[]; ak?: string; akAt?: number; trust?: string }
 
 export async function boot() {
   // One tab owns the keys. Two tabs advancing the same ratchet would corrupt sessions.
@@ -414,21 +431,27 @@ export async function boot() {
   }
   const saved = await kv<Uint8Array>('account')
   const meta = (await kv<Meta>('meta')) ?? null
-  set({ chats: await loadChats(), people: (await kv<Record<string, Person>>('people')) ?? {}, stickers: (await kv<Att[]>('stickers')) ?? [], gifs: (await kv<Att[]>('gifs')) ?? [], blocked: meta?.blocked ?? [] })
   if (meta?.settings) set({ settings: { ...state.settings, ...meta.settings } })
   applyTheme()
+  if (saved) {
+    acct = Account.load(saved)
+    skipped = !!meta?.skipped
+    myAk = meta?.ak ?? b64(crypto.getRandomValues(new Uint8Array(16)))
+    akAt = meta?.akAt ?? 0
+    pinnedTrust = meta?.trust ?? null
+    set({ me: { id: acct.id, username: meta?.username ?? null, device: acct.device, main: acct.is_main }, profile: meta?.profile ?? state.profile })
+    // Connect while the chats load: the network round trips (TLS, sign-in) overlap reading the
+    // database, and whatever the server sends waits for `loaded` (see onPush).
+    connect()
+  }
+  set({ chats: await loadChats(), people: (await kv<Record<string, Person>>('people')) ?? {}, stickers: (await kv<Att[]>('stickers')) ?? [], gifs: (await kv<Att[]>('gifs')) ?? [], blocked: meta?.blocked ?? [] })
+  markLoaded()
   if (!saved) return set({ phase: 'welcome' })
-  acct = Account.load(saved)
-  skipped = !!meta?.skipped
-  myAk = meta?.ak ?? b64(crypto.getRandomValues(new Uint8Array(16)))
-  pinnedTrust = meta?.trust ?? null
-  set({
-    me: { id: acct.id, username: meta?.username ?? null, device: acct.device, main: acct.is_main },
-    profile: meta?.profile ?? state.profile,
-    phase: meta?.username || meta?.skipped ? 'app' : 'username',
-  })
-  connect()
+  set({ phase: meta?.username || meta?.skipped ? 'app' : 'username' })
 }
+/** Chats, contacts and blocks are in memory: until then, what the server sends waits (onPush). */
+let markLoaded!: () => void
+const loaded = new Promise<void>((r) => (markLoaded = r))
 
 /** Create a new account, or restore one from its phrase. Resolves once the server knows our keys. */
 export async function createAccount(phrase: string): Promise<void> {
@@ -462,9 +485,11 @@ let signupError: string | null = null
 let skipped = false
 // Sealed sender: our access key (shared only with accepted contacts) and the server's pinned trust root.
 let myAk = ''
+/** When myAk was made, so a device that was offline can't bring back a key a block replaced. */
+let akAt = 0
 let pinnedTrust: string | null = null
 function saveMeta() {
-  return kv<Meta>('meta', { username: state.me?.username ?? null, skipped, settings: state.settings, profile: state.profile, blocked: state.blocked, ak: myAk, trust: pinnedTrust ?? undefined })
+  return kv<Meta>('meta', { username: state.me?.username ?? null, skipped, settings: state.settings, profile: state.profile, blocked: state.blocked, ak: myAk, akAt, trust: pinnedTrust ?? undefined })
 }
 
 export function skipUsername() {
@@ -478,20 +503,16 @@ export function updateSettings(patch: Partial<Settings>) {
   applyTheme()
   saveMeta()
   if ('notifications' in patch) registerPush()
-  // Backups off: delete the copy on the server too. Back on: make one now.
-  // (Not while the old backup is still waiting to be restored: it may be the only copy of those chats.)
-  if (patch.backup === false && acct?.is_main)
-    void kv('restore').then((waiting) => {
-      if (!waiting) rpc({ t: 'backup', id: '' }).then(() => kv('backup', null), () => {})
-    })
-  if (patch.backup === true) void backupNow(true)
+  // Backups off: delete the copy on the server too (see dropBackup). Back on: make one now.
+  if (patch.backup === false && acct?.is_main) void kv('backupDrop', true).then(dropBackup)
+  if (patch.backup === true) void kv('backupDrop', null).then(() => backupNow(true))
 }
 
 /** Update our display name / photo and push it (encrypted) to everyone we've written to. */
 export function setProfile(patch: Partial<Omit<Profile, 'v'>>) {
   set({ profile: { ...state.profile, ...patch, v: Date.now() } })
   saveMeta()
-  mirror({ t: 'acct', profile: state.profile, ak: myAk })
+  mirror({ t: 'acct', profile: state.profile, ak: myAk, akAt })
   const ids = new Set<string>()
   for (const c of Object.values(state.chats)) if (c.messages.some((m) => m.mine) && !c.group?.left) others(c).forEach((m) => ids.add(m))
   ids.forEach((id) => shareProfile(id).catch(() => {}))
@@ -514,8 +535,11 @@ export async function claimUsername(name: string) {
 }
 
 export async function logout() {
+  pushGen++ // a token still on its way must not register after the "off" below
   // A linked device also takes itself off the account, so it stops receiving copies.
   if (acct && !acct.is_main) await rpc({ t: 'unlink', device: acct.device }).catch(() => {})
+  // The main device stays, but this phone's push token goes, so it stops being woken for this account.
+  else if (acct) await rpc({ t: 'push', kind: '', token: '' }).catch(() => {})
   unlinkedNow = true
   ws?.close()
   await kvClear()
@@ -595,7 +619,7 @@ function connect() {
  * So every 30 s while Fog is open, and right away when it comes back to the front or the network
  * returns, ask the server something small; no answer within 5 s means reconnect now.
  */
-async function checkAlive() {
+async function checkAlive(resumed = false) {
   if (!acct || unlinkedNow) return
   if (state.conn === 'offline') {
     backoff = 500 // back from the background or offline: reconnect now, not after the backoff
@@ -603,19 +627,24 @@ async function checkAlive() {
   }
   if (state.conn !== 'online' || ws?.readyState !== WebSocket.OPEN) return
   const sock = ws
+  // Back on a phone after a while away: the connection is probably gone, so give the ping less time.
   const dead = setTimeout(() => {
     if (ws !== sock) return
     pending.forEach((p) => p.rej(new Error('offline')))
     pending.clear()
     connect()
-  }, 5000)
+  }, resumed ? 1500 : 5000)
   // Any answer (even an error) proves the connection is alive. `away` also tells the server
   // whether anyone's looking, which phones need for push.
   await rpc({ t: 'away', away: document.hidden }).catch(() => {})
   clearTimeout(dead)
 }
 setInterval(() => document.visibilityState === 'visible' && void checkAlive(), 30_000)
-document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && void checkAlive())
+let hiddenAt = 0
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return void (hiddenAt = Date.now())
+  void checkAlive(!!hiddenAt && Date.now() - hiddenAt > 20_000)
+})
 window.addEventListener('online', () => void checkAlive())
 window.addEventListener('focus', () => void checkAlive())
 
@@ -641,6 +670,8 @@ function ack(id: number) {
 }
 
 async function onPush(m: any) {
+  // Signing in can start before the chats are loaded; everything after it waits for them (in order).
+  if (m.t !== 'challenge') await loaded
   switch (m.t) {
     case 'challenge': {
       authNonce = m.nonce
@@ -676,14 +707,18 @@ async function onPush(m: any) {
           return
         }
       } else {
-        if (m.prekeys < 20 || (m.kyber ?? 0) < 10) await topUp(m.prekeys, m.kyber ?? 0)
-        // Weekly signed-prekey rotation.
-        await serial(async () => {
-          if (!acct!.rotate(Date.now())) return
-          const keys = JSON.parse(acct!.keys(0, 0))
-          await saveAccount()
-          await rpc({ t: 'keys', keys })
-        })
+        // Topping up prekeys and the weekly signed-prekey rotation happen once online, not before:
+        // the server answers only after replaying the queued messages, which can take a while.
+        const { prekeys, kyber } = m
+        void waitOnline().then(async () => {
+          if (prekeys < 20 || (kyber ?? 0) < 10) await topUp(prekeys, kyber ?? 0)
+          await serial(async () => {
+            if (!acct!.rotate(Date.now())) return
+            const keys = JSON.parse(acct!.keys(0, 0))
+            await saveAccount()
+            await rpc({ t: 'keys', keys })
+          })
+        }).catch(() => {})
       }
       if (m.username && m.username !== state.me?.username) {
         set({ me: { ...state.me!, username: m.username } })
@@ -694,14 +729,17 @@ async function onPush(m: any) {
         if (!pinnedTrust) pinnedTrust = m.trust
         else if (pinnedTrust !== m.trust) console.warn('server trust root changed; sealed messages will be refused')
       }
-      if (!myAk) myAk = b64(crypto.getRandomValues(new Uint8Array(16)))
+      const newAk = !myAk
+      if (newAk) myAk = b64(crypto.getRandomValues(new Uint8Array(16)))
       saveMeta()
       set({ conn: 'online' })
       for (const id of unacked) unacked.delete(id), ack(id)
       linkToken = null
       refreshDevices()
       // Register our access key before anything else goes out (the RPC layer only works once online).
-      await rpc({ t: 'access', key: myAk }).catch(() => {})
+      // Only the main device does on every connect: a linked one that was offline may still hold the
+      // key from before a block replaced it, and would hand it back to the blocked person.
+      if (acct!.is_main || newAk) await rpc({ t: 'access', key: myAk }).catch(() => {})
       registerPush()
       // A restore that didn't finish (or failed) goes first: a backup made before it would replace the old one.
       if (acct!.is_main) void (async () => ((await kv('restore')) ? (await tryRestore()) && backupSoon() : backupSoon()))()
@@ -818,24 +856,32 @@ async function linkCode(secret: Uint8Array) {
   const n = ((h[0] << 16) | (h[1] << 8) | h[2]) % 1_000_000
   return String(n).padStart(6, '0').replace(/(\d{3})(\d{3})/, '$1 $2')
 }
+/** iv + AES-GCM ciphertext under a link key. */
+async function linkSealWith(key: CryptoKey, data: Uint8Array) {
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes(data)))
+  return new Uint8Array([...iv, ...ct])
+}
+const linkOpenWith = async (key: CryptoKey, raw: Uint8Array) => new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes(raw.subarray(0, 12)) }, key, bytes(raw.subarray(12))))
 async function linkSeal(theirPub: Uint8Array, data: Uint8Array) {
   const eph = link_keypair()
   const secret = link_agree(eph.subarray(0, 32), theirPub)
   const key = await linkKey(secret)
-  const iv = crypto.getRandomValues(new Uint8Array(12))
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes(data)))
-  return { body: new Uint8Array([...eph.subarray(32), ...iv, ...ct]), code: await linkCode(secret) }
+  return { body: new Uint8Array([...eph.subarray(32), ...(await linkSealWith(key, data))]), code: await linkCode(secret), key }
 }
 async function linkOpen(priv: Uint8Array, raw: Uint8Array) {
   const secret = link_agree(priv, raw.subarray(0, 32))
   const key = await linkKey(secret)
-  const data = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes(raw.subarray(32, 44)) }, key, bytes(raw.subarray(44))))
-  return { data, code: await linkCode(secret) }
+  return { data: await linkOpenWith(key, raw.subarray(32)), code: await linkCode(secret), key }
 }
-/** What the new device shows (as a QR code and as text to paste). */
+/**
+ * What the new device shows (as a QR code and as text to paste). Since v2 it carries a second
+ * channel: the main device first sends only a hello on the first one, both screens show the code,
+ * and the account goes to the second one only after you confirm the code on the main device.
+ */
 export function parseLinkCode(code: string) {
-  const m = /fog-link:([0-9a-f]{32}):([A-Za-z0-9_-]{43})/.exec(code.trim())
-  return m ? { channel: m[1], pub: unb64url(m[2]) } : null
+  const m = /fog-link:([0-9a-f]{32}):([A-Za-z0-9_-]{43})(?::([0-9a-f]{32}))?/.exec(code.trim())
+  return m ? { channel: m[1], pub: unb64url(m[2]), second: m[3] } : null
 }
 
 type LinkPayload = { v: 1; identity: string; device: number; token: string; ak: string; username: string | null; skipped: boolean; profile: Profile; archive?: ArchiveRef }
@@ -900,7 +946,7 @@ async function importArchive(ref: ArchiveRef) {
 const BACKUP_EVERY = 24 * 3_600_000
 export async function backupNow(force = false) {
   if (!acct?.is_main || state.backup.busy || state.conn !== 'online' || typeof CompressionStream === 'undefined') return
-  if (!force && state.settings.backup === false) return
+  if (state.settings.backup === false) return
   // Never replace a backup we haven't restored yet: it may hold the only copy of the old chats.
   if (await kv('restore')) return void (force && toast("Your old chats haven't been restored yet, so Fog won't replace their backup. Try restoring again in Settings."))
   set({ backup: { ...state.backup, busy: true } })
@@ -911,6 +957,9 @@ export async function backupNow(force = false) {
     // Nothing changed since the last one: no need to upload the same thing again.
     if (!force && last?.hash === hash) return void (await kv('backup', { ...last, at: Date.now() }), set({ backup: { at: Date.now(), busy: false } }))
     const id = await sealUpload(data, acct.backup_key(), true)
+    // Backups were turned off while this was on its way up: it doesn't become the backup after all.
+    // (Read afresh: TypeScript would assume it can't have changed since the check above.)
+    if ((state.settings.backup as boolean | undefined) === false) return void set({ backup: { ...state.backup, busy: false } })
     await rpc({ t: 'backup', id })
     await kv('backup', { at: Date.now(), hash })
     set({ backup: { at: Date.now(), busy: false } })
@@ -920,7 +969,17 @@ export async function backupNow(force = false) {
     if (force) toast("Couldn't back up your chats. Try again in a bit.")
   }
 }
+/**
+ * Backups turned off: delete the server's copy. The wish is kept (`backupDrop`) and tried again on
+ * every connect until the server confirms, so going offline or restarting doesn't leave it there.
+ * Not while the old backup is still waiting to be restored: it may be the only copy of those chats.
+ */
+async function dropBackup() {
+  if (!acct?.is_main || !(await kv('backupDrop')) || (await kv('restore')) || state.settings.backup !== false) return
+  await rpc({ t: 'backup', id: '' }).then(() => Promise.all([kv('backup', null), kv('backupDrop', null)]), () => {})
+}
 async function backupSoon() {
+  void dropBackup()
   const last = await kv<{ at: number }>('backup')
   if (last) set({ backup: { ...state.backup, at: last.at } })
   if (!last || Date.now() - last.at > BACKUP_EVERY) setTimeout(() => void backupNow(), 30_000)
@@ -951,6 +1010,8 @@ export async function retryRestore() {
 export async function skipRestore() {
   await kv('restore', null)
   set({ backup: { ...state.backup, restoreFailed: false } })
+  // Backups on: the next one replaces it. Off: it's deleted.
+  await dropBackup()
   await backupNow(true)
 }
 
@@ -986,25 +1047,31 @@ async function mergeArchive(a: Archive) {
  * New device: show `onCode` (QR + text), wait for the main device, then set up this device and copy
  * the chat history. Resolves once it's ready to use.
  */
-export async function linkThisDevice(onCode: (code: string) => void, onStep: (s: 'linking' | 'history') => void, signal: AbortSignal, confirm: (code: string) => Promise<boolean>) {
+export async function linkThisDevice(onCode: (code: string) => void, onStep: (s: 'approve' | 'linking' | 'history') => void, signal: AbortSignal, confirm: (code: string) => Promise<boolean>) {
   const kp = link_keypair()
-  const sock = new WebSocket(`${wsBase()}/link`)
-  signal.addEventListener('abort', () => sock.close())
-  const body = await new Promise<string>((res, rej) => {
-    sock.onmessage = (e) => {
-      const m = JSON.parse(e.data)
-      if (m.t === 'channel') onCode(`fog-link:${m.id}:${b64url(kp.subarray(32))}`)
-      else if (m.t === 'provision') res(m.body)
-    }
-    sock.onclose = () => rej(new Error(signal.aborted ? 'cancelled' : 'expired'))
-  })
-  sock.onclose = null
-  sock.close()
-  const opened = await linkOpen(kp.subarray(0, 32), unb64(body))
-  // Someone who saw this screen's code could link it to *their* account; the matching code proves it's yours.
-  if (!(await confirm(opened.code))) throw new Error('cancelled')
+  const a = linkChannel(signal)
+  const b = linkChannel(signal)
+  let data: Uint8Array
+  try {
+    const [ca, cb] = await Promise.all([a.id, b.id])
+    onCode(`fog-link:${ca}:${b64url(kp.subarray(32))}:${cb}`)
+    const opened = await linkOpen(kp.subarray(0, 32), unb64(await a.body))
+    a.close()
+    // Someone who saw this screen's code could link it to *their* account; the matching code proves it's yours.
+    if (!(await confirm(opened.code))) throw new Error('cancelled')
+    // A current main device sends just a hello first, and the account only once you've confirmed the
+    // code there too. An older one (v1) already sent everything.
+    const hello = JSON.parse(td.decode(opened.data))
+    if (hello.v === 2) {
+      onStep('approve')
+      data = await linkOpenWith(opened.key, unb64(await b.body))
+    } else data = opened.data
+  } finally {
+    a.close()
+    b.close()
+  }
   onStep('linking')
-  const p: LinkPayload = JSON.parse(td.decode(opened.data))
+  const p: LinkPayload = JSON.parse(td.decode(data))
   acct = Account.create_linked(unb64(p.identity), p.device, Date.now())
   linkToken = p.token
   myAk = p.ak
@@ -1028,28 +1095,58 @@ export async function linkThisDevice(onCode: (code: string) => void, onStep: (s:
   set({ phase: 'app' })
 }
 
-/** Main device: link the device showing `code`. Resolves once the new device is set up. */
-export async function linkDevice(code: string, onStep: (s: 'sending' | 'waiting', check?: string) => void) {
+/** One /link socket on the new device: its channel id, then the one transfer the main device sends to it. */
+function linkChannel(signal: AbortSignal) {
+  const sock = new WebSocket(`${wsBase()}/link`)
+  const next = (t: 'channel' | 'provision') =>
+    new Promise<string>((res, rej) => {
+      sock.addEventListener('message', (e) => {
+        const m = JSON.parse(e.data)
+        if (m.t === t) res(t === 'channel' ? m.id : m.body)
+      })
+      sock.addEventListener('close', () => rej(new Error(signal.aborted ? 'cancelled' : 'expired')))
+    })
+  const id = next('channel')
+  const body = next('provision')
+  // Either may go unawaited if the other socket fails first.
+  id.catch(() => {})
+  body.catch(() => {})
+  signal.addEventListener('abort', () => sock.close())
+  return { id, body, close: () => sock.close() }
+}
+
+/**
+ * Main device: link the device showing `code`. Resolves once the new device is set up. Nothing
+ * secret leaves this device until `confirm` says the code matches the one on the new device: a
+ * code someone else made (or swapped in) only ever gets a hello.
+ */
+export async function linkDevice(code: string, onStep: (s: 'sending' | 'waiting') => void, confirm: (check: string) => Promise<boolean>) {
   const c = parseLinkCode(code)
   if (!c) throw new Error('bad_code')
+  // Codes from older apps have one channel, so the account would have to go before the check.
+  if (!c.second) throw new Error('old_code')
+  const hello = await linkSeal(c.pub, te.encode(JSON.stringify({ v: 2 })))
+  await rpc({ t: 'provision', channel: c.channel, body: b64(hello.body) })
+  if (!(await confirm(hello.code))) throw new Error('cancelled')
   const { device, token } = await rpc({ t: 'link_begin' })
   onStep('sending')
   // ponytail: messages that arrive between this snapshot and the new device going live only reach this one.
   const archive = await makeArchive().catch(() => undefined)
   const payload: LinkPayload = { v: 1, identity: b64(acct!.link_identity()), device, token, ak: myAk, username: state.me!.username, skipped, profile: state.profile, archive }
-  const sealed = await linkSeal(c.pub, te.encode(JSON.stringify(payload)))
-  await rpc({ t: 'provision', channel: c.channel, body: b64(sealed.body) })
-  onStep('waiting', sealed.code)
+  await rpc({ t: 'provision', channel: c.second, body: b64(await linkSealWith(hello.key, te.encode(JSON.stringify(payload)))) })
+  onStep('waiting')
   await Promise.race([waitFor(() => state.devices.some((d) => d.id === device && d.ready)), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 120_000))])
   if (!archive) toast("Linked, but your chat history couldn't be copied")
 }
 
 // ---------- sending ----------
-let cert: { b: Uint8Array; exp: number } | null = null
+// Renewed after half an hour by our own clock. Certificates are short-lived (an unlinked device can use
+// its last one until it runs out), and the expiry is in the server's clock, which ours may not match.
+let cert: { b: Uint8Array; at: number } | null = null
 async function senderCert() {
-  if (!cert || cert.exp - Date.now() < 3_600_000) {
+  if (!cert || Math.abs(Date.now() - cert.at) > 1_800_000) {
     const r = await rpc({ t: 'cert' })
-    cert = { b: unb64(r.cert), exp: r.expires }
+    cert = { b: unb64(r.cert), at: Date.now() }
   }
   return cert.b
 }
@@ -1093,6 +1190,8 @@ async function ensureSessions(peer: string, devices?: number[], ak?: string) {
 /** The server says our device list for `peer` is stale: forget removed devices, add new ones. */
 async function fixDevices(peer: string, m: { missing?: number[]; extra?: number[] }, ak?: string) {
   for (const d of m.extra ?? []) acct!.drop_session(peer, d)
+  // Remembered, so the unlinked device can't carry on writing to us with its last sender certificate.
+  if (m.extra?.length) setPerson(peer, { gone: [...new Set([...(state.people[peer]?.gone ?? []), ...m.extra])].slice(-50) })
   await ensureSessions(peer, m.missing ?? [], ak)
 }
 
@@ -1104,6 +1203,8 @@ async function fixDevices(peer: string, m: { missing?: number[]; extra?: number[
 function deliver(peer: string, p: Payload, opts: { openOk?: boolean } = {}) {
   return serial(async () => {
     const self = peer === acct!.id
+    // fog-bot's allowlist: nothing at all (messages, profile, receipts) goes to anyone not on it.
+    if (!self && bot?.reach && !bot.reach(peer)) throw new Error('not_allowed')
     const bytes = pad(te.encode(JSON.stringify(p)))
     // Worth waking their phone for: messages and incoming calls, not receipts, typing or our own syncs.
     // (The server learns this one bit per message; Signal sends the same.)
@@ -1194,8 +1295,9 @@ export function setVideoThumb(chat: string, id: string, thumb: string) {
  * After blocking someone, replace our sealed-sender access key and re-share it with everyone else,
  * so the blocked person can no longer deliver sealed messages to us at all.
  */
-function rotateAccessKey() {
+export function rotateAccessKey() {
   myAk = b64(crypto.getRandomValues(new Uint8Array(16)))
+  akAt = Date.now()
   rpc({ t: 'access', key: myAk }).catch(() => {})
   setProfile({})
   for (const c of Object.values(state.chats)) if (c.group && !c.group.left && !c.request) shareWithGroup(c.id)
@@ -1439,6 +1541,7 @@ export function addCallRecord(peer: string, call: CallRecord, by?: string) {
   const me = state.me!.id
   const missed = !call.out && call.missed
   const req = !state.chats[peer] || !!state.chats[peer].request
+  if (req && !call.out && requestFull(peer)) return
   setChat(peer, (c) => ({ ...c, request: req && !call.out ? true : c.request, unread: missed && state.active !== peer ? c.unread + 1 : c.unread, messages: [...c.messages, sysMsg({ k: 'call', by: by ?? (call.out ? me : peer), call })] }))
   saveChats()
   if (missed && !req) notify(peer, `Missed ${call.video ? 'video' : 'voice'} call`)
@@ -1589,7 +1692,7 @@ export function block(id: string) {
   if (!isBlocked(id)) set({ blocked: [...state.blocked, id] })
   rotateAccessKey()
   saveMeta()
-  mirror({ t: 'acct', blocked: state.blocked, ak: myAk })
+  mirror({ t: 'acct', blocked: state.blocked, ak: myAk, akAt })
   if (state.chats[id]?.request) deleteChat(id)
   toast('Blocked')
 }
@@ -1728,6 +1831,7 @@ async function onGroup(from: string, p: Extract<Payload, { t: 'group' }>, ts: nu
     if (!members.includes(me)) return
     // A group we created on another of our devices.
     if (from === me) return setChat(id, () => ({ id, messages: [sysMsg({ k: 'create', by: me, name }, ts)], unread: 0, group: { members, owner: me, v, sig: p.sig, hash }, name, avatar }))
+    if (!isTrusted(from) && requestFull(id)) return
     setChat(id, () => ({ id, messages: [sysMsg({ k: 'add', by: from, who: [me] }, ts)], unread: 1, group: { members, owner: from, v, sig: p.sig, hash }, name, avatar, request: !isTrusted(from) || undefined }))
     members.forEach((m) => m !== me && !state.people[m] && resolveName(m))
     // Not awaited: we're inside the receive queue, and sharing enqueues sends behind it.
@@ -1748,10 +1852,11 @@ async function onGroup(from: string, p: Extract<Payload, { t: 'group' }>, ts: nu
     name,
     avatar,
     group: { members, owner: from, v, sig: p.sig, hash, gone: c.group?.gone?.filter((x) => members.includes(x)), left: !members.includes(me) || c.group?.left },
-    messages: [...c.messages, ...sys],
+    messages: requestFull(id) ? c.messages : [...c.messages, ...sys],
   }))
   added.forEach((m) => m !== me && !state.people[m] && resolveName(m))
-  if (added.length) added.forEach((m) => m !== me && void shareProfile(m).catch(() => {}))
+  // Not while the group is still a request: joining is what shows you to its members (see acceptRequest).
+  if (added.length && !state.chats[id]?.request && !state.chats[id]?.group?.left) added.forEach((m) => m !== me && void shareProfile(m).catch(() => {}))
 }
 
 /** Someone holds a different signed state for the same version: the owner equivocated. */
@@ -1767,6 +1872,18 @@ const str = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max
 const num = (v: unknown, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(Number(v) || lo)))
 const imgUrl = (v: unknown, max: number) => (typeof v === 'string' && v.length <= max && /^data:image\/(webp|jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(v) ? v : undefined)
 const KINDS: Kind[] = ['photo', 'video', 'audio', 'voice', 'file', 'sticker', 'videonote']
+
+// Message requests come from people you haven't accepted: keep a readable preview of what they send,
+// not all of it, so a stranger can't fill this device's storage.
+const REQ_MSGS = 20
+const REQ_TEXT = 2000
+const REQ_CHATS = 50
+/** Is request chat `id` (or, if it doesn't exist yet, the pile of requests) already full? */
+function requestFull(id: string) {
+  const c = state.chats[id]
+  if (c) return !!c.request && c.messages.length >= REQ_MSGS
+  return Object.values(state.chats).filter((x) => x.request).length >= REQ_CHATS
+}
 
 /** Validate an attachment pointer from a peer. */
 function readAtt(a: any): Att | undefined {
@@ -1874,6 +1991,8 @@ export type BotHooks = {
   autocomplete?(e: { chat: string; from: string; q: string; cmd: string; opt: string; val: string; args: string }): void
   group?(chat: string): void
   thread?(chat: string, t: Thread, from: string, created: boolean): void
+  /** Whether anything may be sent to this person (checked before every send to someone else). */
+  reach?(peer: string): boolean
 }
 let bot: BotHooks | null = null
 export const setBotHooks = (h: BotHooks) => void (bot = h)
@@ -2031,6 +2150,9 @@ function receive(m: { id: number; from: string | null; dev?: number; sealed?: bo
     let dev = m.dev ?? 1
     const kept = unsaved.get(m.id)
     unsaved.delete(m.id)
+    // Blocked: not even decrypted. Every fresh session a sender starts leaves a mark in our stored
+    // key state, so decrypting would let them grow it; after an unblock the session just resets.
+    if (!kept && !m.sealed && isBlocked(from)) return ack(m.id)
     if (kept) ({ from, decoded } = kept)
     else try {
       if (m.sealed) {
@@ -2041,6 +2163,7 @@ function receive(m: { id: number; from: string | null; dev?: number; sealed?: bo
         const out = acct!.unseal(unb64(m.body), unb64(pinnedTrust), m.ts)
         from = td.decode(out.subarray(0, 43))
         dev = out[43]
+        if (state.people[from]?.gone?.includes(dev)) throw new Error('from an unlinked device')
         decoded = JSON.parse(td.decode(unpad(out.subarray(44))))
       } else decoded = JSON.parse(td.decode(unpad(acct!.decrypt(from, dev, unb64(m.body)))))
     } catch (e) {
@@ -2065,8 +2188,8 @@ function receive(m: { id: number; from: string | null; dev?: number; sealed?: bo
     // ack, so the server keeps the message; and the stored ratchet hasn't moved past it, so it can
     // still be decrypted after a reload.
     const keep = () => (unsaved.set(m.id, { from, decoded }), storageFull())
-    // Blocked: decrypted (keeps the session in step) and dropped. Same for anything that isn't a
-    // payload object: a valid Signal message can still carry `null` or `[]`.
+    // Blocked (sealed, so we only know now): dropped. Same for anything that isn't a payload object:
+    // a valid Signal message can still carry `null` or `[]`.
     const valid = !isBlocked(from) && !!decoded && typeof decoded === 'object' && !Array.isArray(decoded) && typeof decoded.t === 'string'
     try {
       // From another of our own devices: only sync messages, never chat traffic.
@@ -2158,7 +2281,18 @@ async function handleSync(m: { id: number; ts: number }, dev: number, p: Payload
     if (p.profile && typeof p.profile === 'object' && Number(p.profile.v) > state.profile.v)
       set({ profile: { name: str(p.profile.name, 64), avatar: imgUrl(p.profile.avatar, 120_000), v: Number(p.profile.v), bot: readBot(p.profile.bot) } })
     if (Array.isArray(p.blocked)) set({ blocked: p.blocked.filter((x) => typeof x === 'string' && ID_RE.test(x)) })
-    if (typeof p.ak === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(p.ak)) myAk = p.ak
+    if (typeof p.ak === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(p.ak) && p.ak !== myAk) {
+      // A newer key from another of our devices (say, one that just blocked someone). The main device
+      // re-registers it, in case it put its own older key back on connecting. A key without a date
+      // comes from an older app: taken as before, but not pushed.
+      const at = Number(p.akAt)
+      if (!p.akAt) myAk = p.ak
+      else if (Number.isFinite(at) && at > akAt) {
+        myAk = p.ak
+        akAt = at
+        if (acct!.is_main) rpc({ t: 'access', key: myAk }).catch(() => {})
+      }
+    }
     await saveMeta()
   } else if (p.t === 'chatmeta' && okChat(p.chat) && state.chats[p.chat]) {
     const chat = p.chat
@@ -2214,11 +2348,12 @@ async function handlePayload(m: { id: number; ts: number }, from: string, dev: n
   const fresh = (c: Chat): Chat => (!known && !inGroup ? { ...c, request: true } : c)
   const own = (id: unknown) => state.chats[chat]?.messages.find((x) => x.id === id && !x.mine && (x.from ?? from) === from)
   let receipt: Payload | null = null
+  const req = !known ? !inGroup : !!state.chats[chat].request
   if (p.t === 'text') {
     const id = str(p.id, 64)
-    if (id && (!inGroup || id.startsWith(`${from.slice(0, 16)}.`)) && !state.chats[chat]?.messages.some((x) => x.id === id)) {
+    if (id && (!inGroup || id.startsWith(`${from.slice(0, 16)}.`)) && !state.chats[chat]?.messages.some((x) => x.id === id) && !(req && requestFull(chat))) {
       const viewing = state.active === chat && document.visibilityState === 'visible'
-      const msg: Msg = { id, mine: false, text: str(p.text, 65536), ts: Math.min(Number(p.ts) || m.ts, m.ts), seen: viewing }
+      const msg: Msg = { id, mine: false, text: str(p.text, req ? REQ_TEXT : 65536), ts: Math.min(Number(p.ts) || m.ts, m.ts), seen: viewing }
       if (inGroup) msg.from = from
       if (p.reply) msg.reply = str(p.reply, 64)
       if (p.fwd) msg.fwd = true
@@ -2265,11 +2400,11 @@ async function handlePayload(m: { id: number; ts: number }, from: string, dev: n
           archived: c.archived && (muted || viewing) ? c.archived : undefined,
           messages: [...c.messages, msg],
         }))
-        const req = !known ? !inGroup : !!state.chats[chat].request
         // Requests get no receipts: they don't learn you've seen anything until you accept.
         if (!req) receipt = { t: 'receipt', ids: [id], s: viewing && state.settings.readReceipts ? 'read' : 'delivered' }
-        // Photos and voice notes download right away, like other messengers. Big files wait for a tap.
-        if (att && (att.kind === 'photo' || att.kind === 'voice' || (att.kind !== 'file' && att.size < 15_000_000))) download(att)
+        // Photos, voice notes and other media download right away, like other messengers. Big files
+        // wait for a tap, and so does anything in a request (it may be from anyone).
+        if (att && !req && att.kind !== 'file' && att.size < 15_000_000) download(att)
         if (!viewing && !req && !msg.quiet && (!muted || msg.mentionsMe)) {
           if (state.settings.sounds) chime()
           const body = msg.poll ? `📊 ${msg.poll.q}` : msg.text || attLabel(att!)
@@ -2297,6 +2432,7 @@ async function handlePayload(m: { id: number; ts: number }, from: string, dev: n
     setChat(chat, (c) => ({ ...c, messages: c.messages.map((x) => (x.id === p.id ? { ...x, re: withReaction(x.re, from, emoji) } : x)) }))
     if (typeof p.id === 'string') bot?.reaction?.(chat, p.id, from, emoji)
   } else if (p.t === 'edit' && own(p.id)) {
+    if (req) p.text = str(p.text, REQ_TEXT)
     setChat(chat, (c) => ({ ...c, messages: c.messages.map((x) => (x.id === p.id && !x.mine ? { ...x, ...applyEdit(x, p) } : x)) }))
     bot?.edited?.(chat, own(p.id)!, from)
   } else if (p.t === 'delete' && own(p.id)) {

@@ -1,7 +1,7 @@
 // Fog's native apps (desktop, iOS, Android) are the web client in a native window. They load only
-// bundled files, and the page can call exactly three native commands (below): show a notification,
-// set the unread count, and get the phone's push token. No other Tauri APIs are granted (no
-// capabilities). On desktop, updates are handled here, outside the page: signed releases from GitHub,
+// bundled files, and the page can call only the native commands below (show a notification, set the
+// unread count, get the phone's push token, open a web link in the browser...). No other Tauri APIs are
+// granted (no capabilities). On desktop, updates are handled here, outside the page: signed releases from GitHub,
 // verified against the public key in tauri.conf.json before anything installs. iPhones update
 // through TestFlight; the Android app offers new APKs itself (plugin/).
 
@@ -15,7 +15,10 @@ use desktop::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().plugin(tauri_plugin_notification::init()).invoke_handler(tauri::generate_handler![notify, set_unread, push_token]);
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![notify, set_unread, push_token, open_url, call_active]);
     #[cfg(mobile)]
     let builder = builder
         .plugin(tauri_plugin_fog::init())
@@ -74,6 +77,18 @@ fn notify(app: AppHandle, title: String, body: String) {
     let _ = app.notification().builder().title(clip(title, 80)).body(clip(body, 240)).show();
 }
 
+/// A link the person clicked: open it in their browser (a webview can't open windows of its own). Only
+/// http(s), so a message can't make the app run a file or another app's URL scheme.
+#[tauri::command]
+fn open_url(app: AppHandle, url: String) {
+    use tauri_plugin_opener::OpenerExt;
+    if let Ok(u) = tauri::Url::parse(&url) {
+        if matches!(u.scheme(), "http" | "https") {
+            let _ = app.opener().open_url(u.as_str(), None::<&str>);
+        }
+    }
+}
+
 /// Unread count: next to the menu bar icon and on the Dock icon (macOS), in the tray tooltip elsewhere.
 #[tauri::command]
 fn set_unread(app: AppHandle, count: u32) {
@@ -110,6 +125,16 @@ async fn push_token(app: AppHandle, on: bool) -> Option<serde_json::Value> {
         let _ = (app, on);
         None
     }
+}
+
+/// A call started or ended (the page holds the microphone for its length). Android keeps Fog
+/// running in the background meanwhile, with an ongoing notification. Elsewhere: nothing.
+#[tauri::command]
+async fn call_active(app: AppHandle, on: bool, video: bool) {
+    #[cfg(mobile)]
+    tauri_plugin_fog::call_active(&app, on, video).await;
+    #[cfg(desktop)]
+    let _ = (app, on, video);
 }
 
 /// Phones: invite links (https://getfog.org/app/#add=<account id>) tapped in other apps open Fog

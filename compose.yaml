@@ -43,11 +43,19 @@ services:
     image: coturn/coturn:4.7
     restart: unless-stopped
     network_mode: host
-    command:
+    # The secret goes into a private copy of the config, not onto the command line, where any process
+    # on the host could read it (ps, /proc/*/cmdline). `$$` is a literal `$` for the shell.
+    environment:
+      FOG_TURN_SECRET: ${FOG_TURN_SECRET:?set FOG_TURN_SECRET in .env}
+      FOG_DOMAIN: ${FOG_DOMAIN}
+    entrypoint:
+      - /bin/sh
       - -c
-      - /etc/coturn/turnserver.conf
-      - --static-auth-secret=${FOG_TURN_SECRET}
-      - --realm=${FOG_DOMAIN}
+      - >-
+        umask 077 &&
+        { cat /etc/coturn/turnserver.conf; printf 'static-auth-secret=%s\nrealm=%s\n' "$$FOG_TURN_SECRET" "$$FOG_DOMAIN"; } > /tmp/turnserver.conf &&
+        unset FOG_TURN_SECRET &&
+        exec turnserver -c /tmp/turnserver.conf
     volumes:
       - ./deploy/turnserver.conf:/etc/coturn/turnserver.conf:ro
 

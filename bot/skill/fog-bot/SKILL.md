@@ -31,11 +31,13 @@ fog-bot run
 - `init` prints the account's **recovery phrase** (the only way back into the account; tell the user to
   store it safely, and never put it in code or logs) and the **API token**. `fog-bot token` prints the token again.
 - `--owner @you` locks the bot to its owner. Always suggest it for personal agents. Without an allowlist,
-  anyone can message the bot.
+  anyone can message the bot. If the owner can't be found, `init` fails (after printing the phrase) and the
+  bot stays closed to everyone until `fog-bot allow --add @you`.
 - `--server URL` for a self-hosted Fog server (default `https://getfog.org`). `--dir DIR` for a second bot
   (default `~/.fog-bot`, one folder per bot; it holds the keys, keep it private).
-- The API listens on `127.0.0.1:8790` (`--port`, `--host`). Only expose it beyond localhost if the user
-  understands that the token then gives full control of the account.
+- The API listens on `127.0.0.1:8790` (`--port`, `--host`). The token gives full control of the account, so a
+  non-loopback `--host` needs HTTPS (`--tls-cert cert.pem --tls-key key.pem`); otherwise fog-bot refuses to start.
+  Prefer keeping it on localhost (an SSH tunnel or a TLS proxy for remote clients).
 - Only one `fog-bot run` per folder. `fog-bot allow` works while it runs (it picks up changes within a second); `info` needs it stopped.
 
 Keep it running as a service. macOS (`~/Library/LaunchAgents/org.getfog.bot.plist`, then
@@ -73,8 +75,11 @@ fog-bot allow --add @partner   # also --remove, --set, --clear
 
 People not on the list can't reach the bot at all. Their messages stay unanswered requests: no receipts,
 and they never get the bot's profile. They never appear in the API, and the bot gets `403 not_allowed` if it
-tries to write to them. In groups, the bot joins only groups owned by someone on the list and only hears
-people on the list. Usernames are looked up once and saved as account ids.
+tries to write to them. In groups, the bot takes part only in groups owned by someone on the list in which
+every member is on the list (what it posts reaches every member). If someone off the list is added, the group
+drops out of the API and posting answers `403 not_allowed` until they leave or are allowed. Replies, reactions,
+thread names and mentions never carry anyone off the list. Taking someone off the list also drops their waiting
+events and files. Usernames are looked up once and saved as account ids.
 
 ## 3. The loop
 
@@ -195,7 +200,7 @@ Errors are `{"error": "code", "message": "…"}`.
 | 202 `queued: true` | not delivered yet (offline, or the other side unreachable). It's kept and resent; you can still edit it by id. |
 | 400 | bad request: the `error` code says what (`invalid_buttons`, `text_too_long`, `unknown_file`…) |
 | 401 | wrong or missing token |
-| 403 `not_allowed` | the person isn't on the allowlist; `not_yours` / `not_owner` for others' messages and groups |
+| 403 `not_allowed` | the person isn't on the allowlist, or the group has a member who isn't; `not_yours` / `not_owner` for others' messages and groups |
 | 404 | unknown chat, message, file, thread, or an expired `query_id` (answer taps within 15 minutes) |
 
 `GET /health` (no token) answers `{ok, connected}`; `connected: false` means fog-bot can't reach the Fog

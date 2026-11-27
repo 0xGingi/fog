@@ -8,6 +8,12 @@
   <string>Fog uses the microphone for calls, voice messages and video messages.</string>
   <key>NSPhotoLibraryUsageDescription</key>
   <string>Fog lets you choose photos and videos to send.</string>
+  <!-- Calls keep going when you switch apps or lock the phone: without this, iOS suspends the app
+       and cuts its microphone, so the other side stops hearing you. -->
+  <key>UIBackgroundModes</key>
+  <array>
+    <string>audio</string>
+  </array>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Fog connects to your own Fog server if it runs on this network.</string>
   <key>NSAppTransportSecurity</key>

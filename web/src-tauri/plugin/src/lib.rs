@@ -1,5 +1,6 @@
 //! Fog's phone-only native code (Swift in ios/, Kotlin in android/): the push notification token,
-//! and on Android, offering new releases. Only the app's Rust side calls it; the page can't.
+//! and on Android, offering new releases and keeping calls going in the background. Only the app's
+//! Rust side calls it; the page can't.
 
 use serde::{Deserialize, Serialize};
 use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
@@ -40,4 +41,21 @@ pub async fn push_token<R: Runtime>(app: &AppHandle<R>) -> Option<Token> {
     let kind = if cfg!(target_os = "android") { "fcm" } else if cfg!(debug_assertions) { "apns-dev" } else { "apns" };
     let r: Reply = app.state::<Native<R>>().0.run_mobile_plugin_async("token", ()).await.ok()?;
     Some(Token { kind, token: r.token })
+}
+
+/// A call started or ended. Android: start or stop the foreground service that keeps the microphone
+/// (and camera, for video) working while Fog is in the background. iOS needs nothing here: the app's
+/// background audio mode keeps the call's audio session running.
+pub async fn call_active<R: Runtime>(app: &AppHandle<R>, on: bool, video: bool) {
+    #[cfg(target_os = "android")]
+    {
+        #[derive(Serialize)]
+        struct Args {
+            on: bool,
+            video: bool,
+        }
+        let _ = app.state::<Native<R>>().0.run_mobile_plugin_async::<()>("call", Args { on, video }).await;
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (app, on, video);
 }

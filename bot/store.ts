@@ -6,7 +6,8 @@ import { mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Store } from '../web/src/db'
 
-export function openStore(dir: string): Store & { db: Database } {
+/** `gate`: whether an attachment may be written to disk (by its `att:` key); unset, anything may. */
+export function openStore(dir: string): Store & { db: Database; gate?: (key: string) => boolean } {
   const files = join(dir, 'files')
   mkdirSync(files, { recursive: true, mode: 0o700 })
   const db = new Database(join(dir, 'fog.db'), { create: true, strict: true })
@@ -18,7 +19,7 @@ export function openStore(dir: string): Store & { db: Database } {
   // Attachment keys are uuids or blob-id.key-prefix: safe as file names once the key itself can't escape.
   const path = (k: string) => join(files, k.slice(4).replace(/[^A-Za-z0-9._-]/g, '_'))
   const isFile = (k: string) => k.startsWith('att:')
-  return {
+  const store: Store & { db: Database; gate?: (key: string) => boolean } = {
     db,
     async get(k) {
       if (isFile(k)) {
@@ -32,6 +33,7 @@ export function openStore(dir: string): Store & { db: Database } {
     },
     async put(k, v) {
       if (isFile(k)) {
+        if (store.gate && !store.gate(k)) throw new Error('not_allowed')
         await Bun.write(path(k), v as Blob)
         put.run(`type:${k}`, new TextEncoder().encode((v as Blob).type))
         return
@@ -55,4 +57,5 @@ export function openStore(dir: string): Store & { db: Database } {
       mkdirSync(files, { recursive: true, mode: 0o700 })
     },
   }
+  return store
 }

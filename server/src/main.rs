@@ -39,17 +39,33 @@ const MAX_LARGE_BLOB: u64 = 2200 * 1024 * 1024;
 const MAX_PART: usize = 16 * 1024 * 1024;
 /// Abuse limits.
 const UPLOAD_BYTES_PER_DAY: u64 = 4 * 1024 * 1024 * 1024;
+/// Upload bytes per network per day, so a batch of fresh accounts can't each bring their own 4 GB.
+const UPLOAD_BYTES_PER_IP_DAY: u64 = 32 * 1024 * 1024 * 1024;
+/// Free space the blob volume keeps (it holds the database too): uploads are refused before it fills.
+const MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_QUEUED_PER_RECIPIENT: i64 = 10_000;
 /// Bytes of undelivered messages per recipient.
 const MAX_QUEUED_BYTES: i64 = 256 * 1024 * 1024;
+/// One-time prekeys kept per device (the apps keep about 100 EC and 40 Kyber up there).
+const MAX_STORED_PREKEYS: i64 = 400;
+const MAX_STORED_KYBER: i64 = 200;
+/// Open sockets per network (IPv6: per /64) and in all.
+const MAX_CONNS_PER_IP: u32 = 200;
+const MAX_CONNS: u32 = 100_000;
+/// A login for an account that doesn't exist yet has this long to sign up (proof-of-work included).
+const SIGNUP_GRACE: Duration = Duration::from_secs(120);
+/// Abuse reports kept per reporter (the newest).
+const MAX_REPORTS: i64 = 1000;
 const MESSAGE_TTL_DAYS: i64 = 30;
 /// Devices per account: the main device plus up to four linked ones.
 const MAX_DEVICES: i64 = 5;
 const MAIN_DEVICE: u32 = 1;
 /// A new device's link code is good for this long; the app then shows a fresh one.
 const LINK_CHANNEL_LIFE: Duration = Duration::from_secs(180);
-/// Sender certificates (sealed sender). Short, so a device that's been unlinked can't keep using one.
-const CERT_LIFE_MS: i64 = 6 * 3_600_000;
+/// Sender certificates (sealed sender). Short, so a device that's been unlinked can't keep using one
+/// for long: sealed sends are anonymous, so this lifetime is the window in which it still can. (Older
+/// apps renew theirs when it has under an hour left, so it must stay comfortably over an hour.)
+const CERT_LIFE_MS: i64 = 2 * 3_600_000;
 const BLOB_TTL_DAYS: u64 = 45;
 
 struct App {
@@ -72,6 +88,8 @@ struct App {
     /// Shared secret with coturn (`use-auth-secret`) for short-lived TURN credentials.
     turn_secret: Option<String>,
     limits: Limiter,
+    /// Open sockets per network (`ip_key`), and their total under "".
+    conns: Mutex<HashMap<String, u32>>,
     /// Leading zero bits of proof-of-work required to create an account.
     pow_bits: u32,
     /// Behind a reverse proxy (Caddy): take the client IP from X-Forwarded-For.
@@ -205,6 +223,7 @@ async fn main() {
            account TEXT NOT NULL, id INTEGER NOT NULL, key TEXT NOT NULL, sig TEXT NOT NULL, PRIMARY KEY(account, id));
          CREATE TABLE IF NOT EXISTS reports(
            reporter TEXT NOT NULL, reported TEXT NOT NULL, ts INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS reports_pair ON reports(reporter, reported);
          CREATE TABLE IF NOT EXISTS server_keys(name TEXT PRIMARY KEY, value BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS devices(
            account TEXT NOT NULL, id INTEGER NOT NULL, keys TEXT, name TEXT, created INTEGER NOT NULL,
@@ -235,6 +254,7 @@ async fn main() {
         ice_host: env("FOG_ICE_HOST"),
         turn_secret: env("FOG_TURN_SECRET"),
         limits: Limiter::default(),
+        conns: Mutex::default(),
         pow_bits: env("FOG_POW_BITS").and_then(|b| b.parse().ok()).unwrap_or(20),
         trust_proxy: env("FOG_TRUST_PROXY").is_some(),
         host: env("FOG_HOST").map(|h| h.to_ascii_lowercase()),
@@ -360,9 +380,10 @@ fn remove_device(app: &App, db: &Connection, account: &str, device: u32) -> Resu
     db.execute("DELETE FROM kyber_prekeys WHERE account=? AND device=?", params![account, device]).map_err(e)?;
     db.execute("DELETE FROM messages WHERE recipient=? AND device=?", params![account, device]).map_err(e)?;
     db.execute("DELETE FROM push_tokens WHERE account=? AND device=?", params![account, device]).map_err(e)?;
+    // Its connection ends right away: it drops whatever was still on its way out, says "unlinked" and
+    // closes (see `conn`). Every request after this is refused too (`device_exists`).
     let key = format!("{account}.{device}");
     if let Some(c) = app.online.lock().unwrap().remove(&key) {
-        let _ = c.tx.send(json!({"t": "unlinked"}).to_string());
         c.end.cancel();
     }
     let mut links = app.links.lock().unwrap();
@@ -606,7 +627,8 @@ async fn post_sealed(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(
         Some(body) if req.msgs.is_empty() => vec![DeviceMsg { device: MAIN_DEVICE, body }],
         _ => req.msgs,
     };
-    if msgs.iter().map(|m| m.body.len()).sum::<usize>() > MAX_BODY * MAX_DEVICES as usize || msgs.iter().any(|m| m.body.len() > MAX_BODY) {
+    // At most one copy per device, checked before the database lock is taken.
+    if msgs.len() > MAX_DEVICES as usize || msgs.iter().any(|m| m.body.len() > MAX_BODY) {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     let ts = now_ms();
@@ -622,7 +644,7 @@ async fn post_sealed(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(
         if let Err(mismatch) = check_devices(&db, &req.to, None, &msgs) {
             return (StatusCode::CONFLICT, axum::Json(mismatch)).into_response();
         }
-        if queue_full(&db, &req.to) {
+        if !queue_admits(&db, &req.to, "", &msgs) {
             return StatusCode::INSUFFICIENT_STORAGE.into_response();
         }
         let mut ids = vec![];
@@ -736,6 +758,16 @@ fn stun_response(req: &[u8], from: std::net::SocketAddr) -> Option<Vec<u8>> {
     out.extend_from_slice(&(attr.len() as u16).to_be_bytes());
     out.extend(attr);
     Some(out)
+}
+
+/// Free bytes on the volume holding `dir` (None where we can't tell).
+#[cfg(unix)]
+fn disk_free(dir: &std::path::Path) -> Option<u64> {
+    rustix::fs::statvfs(dir).ok().map(|s| s.f_bavail.saturating_mul(s.f_frsize))
+}
+#[cfg(not(unix))]
+fn disk_free(_: &std::path::Path) -> Option<u64> {
+    None
 }
 
 fn blob_id_ok(id: &str) -> bool {
@@ -873,11 +905,52 @@ async fn upgrade(ws: WebSocketUpgrade, headers: HeaderMap, ConnectInfo(peer): Co
     if !app.limits.allow(&format!("conn:{}", ip_key(ip)), 1.0, 30.0) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
+    let Some(slot) = ConnSlot::take(&app, ip) else { return StatusCode::TOO_MANY_REQUESTS.into_response() };
     ws.max_message_size(MAX_BODY * 2).on_upgrade(move |sock| async move {
+        let _slot = slot;
         if let Err(e) = conn(app, sock, host, ip).await {
             eprintln!("conn closed: {e}");
         }
     })
+}
+
+/// An open socket, counted against its network's and the server's limits until it's dropped. (Only
+/// in memory, like the rate limits: just a count per network while its sockets are open.)
+struct ConnSlot(Shared, String);
+
+impl ConnSlot {
+    fn take(app: &Shared, ip: IpAddr) -> Option<ConnSlot> {
+        let key = ip_key(ip);
+        slot_take(&mut app.conns.lock().unwrap(), &key, MAX_CONNS_PER_IP, MAX_CONNS).then(|| ConnSlot(app.clone(), key))
+    }
+}
+
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        slot_release(&mut self.0.conns.lock().unwrap(), &self.1);
+    }
+}
+
+/// Count one more socket for `key` (and in all, under ""), unless that's past either limit.
+fn slot_take(conns: &mut HashMap<String, u32>, key: &str, per_key: u32, total: u32) -> bool {
+    if conns.get("").copied().unwrap_or(0) >= total || conns.get(key).copied().unwrap_or(0) >= per_key {
+        return false;
+    }
+    for k in ["", key] {
+        *conns.entry(k.to_owned()).or_default() += 1;
+    }
+    true
+}
+
+fn slot_release(conns: &mut HashMap<String, u32>, key: &str) {
+    for k in ["", key] {
+        if let Some(n) = conns.get_mut(k) {
+            *n -= 1;
+            if *n == 0 {
+                conns.remove(k);
+            }
+        }
+    }
 }
 
 fn now_ms() -> i64 {
@@ -942,13 +1015,27 @@ fn main_login(recorded: Option<Option<&str>>, claimed: Option<&str>, signed: imp
         None => matches!(claimed, Some(key) if signed(key)).then_some(None).ok_or("bad_auth"),
         // An account from before main-device keys that never recorded one. Accepting a key now would let
         // anyone holding just the identity key (a linked or stolen device) claim the main device, so it's
-        // refused, unless this server still has such accounts and opts in to migrate them.
+        // refused, unless this server still has such accounts and opts in to migrate them, and the account
+        // never linked a device (`never_linked`; the caller folds that into `legacy_ok`).
         Some(None) if legacy_ok => match claimed {
             Some(key) if signed(key) => Ok(Some(key.to_string())),
             _ => Err("bad_auth"),
         },
         Some(None) => Err("bad_auth"),
     }
+}
+
+/// The account has never had a linked device: none on it now, and no device id ever handed out (ids
+/// aren't reused, so an unlinked device leaves `next_device` past 2). Only then is everyone holding its
+/// identity key the main device or its recovery phrase, which is what makes recording a main-device key
+/// from an identity-key login safe for a legacy account (see `main_login`).
+fn never_linked(db: &Connection, account: &str) -> bool {
+    db.query_row(
+        "SELECT next_device <= 2 AND NOT EXISTS(SELECT 1 FROM devices WHERE account=?1 AND id != 1) FROM accounts WHERE id=?1",
+        [account],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
 }
 
 /// Which devices may log in. Every device holds the identity key, so that alone can't tell them
@@ -962,7 +1049,8 @@ fn authorize(app: &App, me: &str, auth: &Auth, challenge: &[u8]) -> Result<(), &
     let main: Option<Option<String>> = db.query_row("SELECT main FROM accounts WHERE id=?", [me], |r| r.get(0)).optional().map_err(|_| "bad_auth")?;
     if auth.device == MAIN_DEVICE {
         let signed = |key: &str| auth.msig.as_ref().and_then(|s| B64.decode(s).ok()).is_some_and(|s| verify(key, challenge, &s));
-        let record = main_login(main.as_ref().map(|m| m.as_deref()), auth.main.as_deref(), signed, std::env::var_os("FOG_LEGACY_MAIN_LOGIN").is_some())?;
+        let legacy_ok = std::env::var_os("FOG_LEGACY_MAIN_LOGIN").is_some() && never_linked(&db, me);
+        let record = main_login(main.as_ref().map(|m| m.as_deref()), auth.main.as_deref(), signed, legacy_ok)?;
         if let Some(key) = record {
             db.execute("UPDATE accounts SET main=? WHERE id=? AND main IS NULL", params![key, me]).map_err(|_| "bad_auth")?;
         }
@@ -1021,9 +1109,18 @@ async fn conn(app: Shared, mut sock: WebSocket, host: String, ip: IpAddr) -> Res
     if let Some(old) = app.online.lock().unwrap().insert(key.clone(), Online { tx: tx.clone(), end: end.clone(), away: false }) {
         old.end.cancel();
     }
+    // However this connection ends (even on an early error), it leaves the online list; otherwise a
+    // dead entry would look like an open app and its pushes would stop.
+    let _leave = Leave { app: app.clone(), key: key.clone(), tx: tx.clone() };
 
-    let (username, registered, prekeys, kyber, queued) = {
+    let (username, registered, prekeys, kyber, upto) = {
         let db = app.db.lock().unwrap();
+        // Unlinked after authorize() but before it joined the online list (so unlinking couldn't end
+        // it): it gets nothing. Checked under the same lock as the queue read, so from here on an
+        // unlink finds this connection and ends it.
+        if device != MAIN_DEVICE && db.query_row("SELECT 1 FROM devices WHERE account=? AND id=?", params![me, device], |_| Ok(())).optional().map_err(|e| e.to_string())?.is_none() {
+            return Err("unlinked".into());
+        }
         let username: Option<Option<String>> = db
             .query_row("SELECT username FROM accounts WHERE id=?", [&me], |r| r.get(0))
             .optional()
@@ -1035,39 +1132,53 @@ async fn conn(app: Shared, mut sock: WebSocket, host: String, ip: IpAddr) -> Res
             .query_row("SELECT count(*) FROM kyber_prekeys WHERE account=? AND device=?", params![me, device], |r| r.get(0))
             .map_err(|e| e.to_string())?;
         let _ = db.execute("UPDATE devices SET seen=? WHERE account=? AND id=?", params![now_ms(), me, device]);
-        let mut stmt = db
-            .prepare("SELECT id, sender, sender_device, body, ts FROM messages WHERE recipient=? AND device=? ORDER BY id")
+        // The backlog is what's queued now; anything newer comes through the outbox.
+        let upto: i64 = db
+            .query_row("SELECT coalesce(max(id), 0) FROM messages WHERE recipient=? AND device=?", params![me, device], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        let queued: Vec<Value> = stmt
-            .query_map(params![me, device], |r| {
-                let from: String = r.get(1)?;
-                let sealed = from.is_empty();
-                Ok(json!({"t": "msg", "id": r.get::<_, i64>(0)?, "from": if sealed { Value::Null } else { from.into() },
-                          "dev": r.get::<_, u32>(2)?, "sealed": sealed, "body": r.get::<_, String>(3)?, "ts": r.get::<_, i64>(4)?}))
-            })
-            .and_then(|rows| rows.collect())
-            .map_err(|e| e.to_string())?;
-        (username.clone().flatten(), username.is_some(), prekeys, kyber, queued)
+        (username.clone().flatten(), username.is_some(), prekeys, kyber, upto)
     };
     send(&mut sock, json!({"t": "ready", "registered": registered, "device": device, "username": username, "prekeys": prekeys, "kyber": kyber, "pow": app.pow_bits, "trust": B64.encode(&app.trust_root)})).await?;
-    for m in queued {
-        send(&mut sock, m).await?;
+    // A page (about a megabyte) at a time, so a full queue is never held in memory whole.
+    let mut after = 0;
+    'replay: while !end.is_cancelled() {
+        let page = queue_page(&app.db.lock().unwrap(), &me, device, after, upto).map_err(|e| e.to_string())?;
+        let Some(last) = page.last() else { break };
+        after = last["id"].as_i64().unwrap_or(upto);
+        for m in page {
+            // Unlinked (or replaced) partway through: the rest of the backlog isn't sent.
+            if end.is_cancelled() {
+                break 'replay;
+            }
+            send(&mut sock, m).await?;
+        }
     }
+    // A login for an account that doesn't exist yet stays only long enough to sign up.
+    let mut signed_up = registered;
+    let grace = tokio::time::sleep(SIGNUP_GRACE);
+    tokio::pin!(grace);
 
-    let result = loop {
+    loop {
         tokio::select! {
             incoming = sock.recv() => match incoming {
                 Some(Ok(Message::Text(text))) => {
                     // Link previews do network IO, so they run off the socket loop and reply via the outbox.
                     if let Ok(p) = serde_json::from_str::<PreviewReq>(&text) {
                         if p.t == "preview" && p.url.len() <= 2048 {
-                            if !app.limits.allow(&format!("preview:{me}"), 0.5, 20.0) || !is_registered(&app, &me) {
+                            // Admitted before any work is queued: a few at a time per account, a bounded
+                            // number in all, so slow sites can't stall everyone's previews.
+                            let ticket = (app.limits.allow(&format!("preview:{me}"), 0.5, 20.0)
+                                && app.limits.allow(&format!("preview-ip:{}", ip_key(ip)), 1.0, 40.0)
+                                && is_registered(&app, &me))
+                                .then(|| preview::admit(&me))
+                                .flatten();
+                            let Some(ticket) = ticket else {
                                 let _ = tx.send(json!({ "rid": p.rid, "error": "slow_down" }).to_string());
                                 continue;
-                            }
+                            };
                             let tx = tx.clone();
                             tokio::spawn(async move {
-                                let mut out = preview::fetch(&p.url).await.map(|v| json!({ "preview": v })).unwrap_or_else(|e| json!({ "error": e }));
+                                let mut out = preview::fetch(&p.url, ticket).await.map(|v| json!({ "preview": v })).unwrap_or_else(|e| json!({ "error": e }));
                                 out["rid"] = p.rid.into();
                                 let _ = tx.send(out.to_string());
                             });
@@ -1082,24 +1193,59 @@ async fn conn(app: Shared, mut sock: WebSocket, host: String, ip: IpAddr) -> Res
                 Some(Err(e)) => break Err(e.to_string()),
             },
             out = rx.recv() => match out {
+                // Ended while this was waiting: not sent (the next turn of the loop closes up).
+                Some(_) if end.is_cancelled() => {}
                 Some(text) => if let Err(e) = sock.send(Message::Text(text.into())).await { break Err(e.to_string()) },
                 None => break Ok(()),
             },
-            // Unlinked, or replaced by a newer login: deliver what's queued (e.g. "unlinked"), then go.
+            // Unlinked, or replaced by a newer login: anything still in the outbox is dropped (a newer
+            // connection replays the queue itself; an unlinked device gets nothing more), then go.
             _ = end.cancelled() => {
-                while let Ok(text) = rx.try_recv() {
-                    let _ = sock.send(Message::Text(text.into())).await;
+                if !device_exists(&app, &me, device) {
+                    let _ = send(&mut sock, json!({"t": "unlinked"})).await;
                 }
                 break Ok(());
             }
+            _ = &mut grace, if !signed_up => {
+                if !is_registered(&app, &me) {
+                    break Ok(());
+                }
+                signed_up = true;
+            }
         }
-    };
-    drop(rx);
-    let mut online = app.online.lock().unwrap();
-    if online.get(&key).is_some_and(|c| c.tx.same_channel(&tx)) {
-        online.remove(&key);
     }
-    result
+}
+
+/// Up to about a megabyte of a device's queue: messages after `after`, up to `upto`, oldest first.
+fn queue_page(db: &Connection, me: &str, device: u32, after: i64, upto: i64) -> rusqlite::Result<Vec<Value>> {
+    let mut st = db.prepare_cached("SELECT id, sender, sender_device, body, ts FROM messages WHERE recipient=? AND device=? AND id>? AND id<=? ORDER BY id LIMIT 500")?;
+    let mut rows = st.query(params![me, device, after, upto])?;
+    let (mut page, mut bytes) = (vec![], 0);
+    while bytes < 1024 * 1024 {
+        let Some(r) = rows.next()? else { break };
+        let from: String = r.get(1)?;
+        let body: String = r.get(3)?;
+        bytes += body.len() + 100;
+        let sealed = from.is_empty();
+        page.push(json!({"t": "msg", "id": r.get::<_, i64>(0)?, "from": if sealed { Value::Null } else { from.into() },
+                         "dev": r.get::<_, u32>(2)?, "sealed": sealed, "body": body, "ts": r.get::<_, i64>(4)?}));
+    }
+    Ok(page)
+}
+
+/// Takes a connection off the online list when it ends, unless a newer one for the device took its place.
+struct Leave {
+    app: Shared,
+    key: String,
+    tx: mpsc::UnboundedSender<String>,
+}
+impl Drop for Leave {
+    fn drop(&mut self) {
+        let mut online = self.app.online.lock().unwrap();
+        if online.get(&self.key).is_some_and(|c| c.tx.same_channel(&self.tx)) {
+            online.remove(&self.key);
+        }
+    }
 }
 
 async fn send(sock: &mut WebSocket, v: Value) -> Result<(), String> {
@@ -1166,7 +1312,7 @@ enum Req {
         /// Worth a push notification (a message or a call, not a receipt or typing).
         #[serde(default)]
         urgent: bool,
-        /// An incoming call: the push rings.
+        /// An incoming call. Sent in the open, it wakes them like a message but doesn't ring (see `handle`).
         #[serde(default)]
         call: bool,
     },
@@ -1182,7 +1328,7 @@ enum Req {
     Ice,
     /// Flag an account for abuse review.
     Report { id: String },
-    /// A sender certificate for sealed sending (valid 24h).
+    /// A sender certificate for sealed sending (valid `CERT_LIFE_MS`).
     Cert,
     /// Register the access key that gates sealed delivery to us.
     Access { key: String },
@@ -1239,7 +1385,8 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
         Req::Username { .. } => ("username", 0.1, 10.0),
         Req::Report { .. } => ("report", 0.05, 5.0),
         Req::Ice => ("ice", 0.2, 10.0),
-        Req::Cert => ("cert", 0.1, 10.0),
+        // Roomy: an older app whose clock runs fast renews before every sealed send. Minting one is cheap.
+        Req::Cert => ("cert", 1.0, 60.0),
         Req::Access { .. } => ("access", 0.1, 10.0),
         Req::Ack { .. } => ("ack", 50.0, 2000.0),
         Req::Push { .. } => ("push", 0.2, 10.0),
@@ -1278,7 +1425,10 @@ fn handle(app: &App, cx: &Ctx, text: &str) -> Value {
                 Some(body) if msgs.is_empty() => vec![DeviceMsg { device: MAIN_DEVICE, body }],
                 _ => msgs,
             };
-            send_msg(app, cx, &to, &msgs, urgent || call, call)
+            // A call still wakes their phone, but only as a message: a ringing push is for sealed sends,
+            // which need the access key they share only with people they've accepted (and rotate when
+            // they block someone). Anyone can send in the open, so here `call` is just the sender's word.
+            send_msg(app, cx, &to, &msgs, urgent || call)
         }
         Req::Away { away } => {
             if let Some(c) = app.online.lock().unwrap().get_mut(&format!("{me}.{}", cx.device)) {
@@ -1417,6 +1567,7 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
                 db.execute("INSERT OR REPLACE INTO kyber_prekeys(account, device, id, key, sig) VALUES(?, ?, ?, ?, ?)", params![me, cx.device, k.id, k.key, k.sig])
                     .map_err(e)?;
             }
+            trim_prekeys(db, me, cx.device).map_err(e)?;
             push_all(app, me, json!({"t": "devices"}));
             Ok(json!({}))
         }
@@ -1495,16 +1646,24 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
             Ok(json!({}))
         }
         Req::Upload { size, backup } => {
-            if size == 0 || size > MAX_LARGE_BLOB {
+            // A chat backup is text (attachments aren't in it) and goes up in one request.
+            if size == 0 || size > MAX_LARGE_BLOB || (backup && size > MAX_BLOB) {
                 return Err("too_large".into());
             }
+            let mut slots = app.uploads.lock().unwrap();
+            slots.retain(|_, (_, e)| *e > Instant::now());
+            // The volume keeps room for the database (and the uploads already promised).
+            let promised: u64 = slots.values().map(|(n, _)| n).sum();
+            if disk_free(&app.blobs).is_some_and(|free| free < MIN_FREE_BYTES + promised + size) {
+                return Err("server_full".into());
+            }
             let day = now_ms() / 86_400_000;
-            if !app.limits.take(&format!("bytes:{me}:{day}"), 0.0, UPLOAD_BYTES_PER_DAY as f64, size as f64) {
+            if !app.limits.take(&format!("bytes-ip:{}:{day}", ip_key(cx.ip)), 0.0, UPLOAD_BYTES_PER_IP_DAY as f64, size as f64)
+                || !app.limits.take(&format!("bytes:{me}:{day}"), 0.0, UPLOAD_BYTES_PER_DAY as f64, size as f64)
+            {
                 return Err("quota".into());
             }
             let id: String = rand::random::<[u8; 16]>().iter().map(|b| format!("{b:02x}")).collect();
-            let mut slots = app.uploads.lock().unwrap();
-            slots.retain(|_, (_, e)| *e > Instant::now());
             // Big uploads go in resumable parts, which may take a while on a slow connection.
             let life = if size > MAX_BLOB { 86_400 } else { 600 };
             slots.insert(id.clone(), (size, Instant::now() + Duration::from_secs(life)));
@@ -1517,7 +1676,7 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
         }
         Req::Report { id } => {
             if id.len() <= 64 {
-                db.execute("INSERT INTO reports(reporter, reported, ts) VALUES(?, ?, ?)", params![me, id, now_ms()]).map_err(e)?;
+                add_report(db, me, &id, now_ms()).map_err(e)?;
             }
             Ok(json!({}))
         }
@@ -1583,6 +1742,29 @@ fn rpc_db(db: &Connection, app: &App, cx: &Ctx, req: Req) -> Result<Value, Strin
     }
 }
 
+/// One row per reporter and reported account (a repeat just updates the time), and only a reporter's
+/// newest `MAX_REPORTS`, so reporting over and over can't grow the database.
+fn add_report(db: &Connection, reporter: &str, reported: &str, ts: i64) -> rusqlite::Result<()> {
+    db.execute("DELETE FROM reports WHERE reporter=? AND reported=?", params![reporter, reported])?;
+    db.execute("INSERT INTO reports(reporter, reported, ts) VALUES(?, ?, ?)", params![reporter, reported, ts])?;
+    db.execute(
+        "DELETE FROM reports WHERE reporter=?1 AND rowid NOT IN (SELECT rowid FROM reports WHERE reporter=?1 ORDER BY rowid DESC LIMIT ?2)",
+        params![reporter, MAX_REPORTS],
+    )?;
+    Ok(())
+}
+
+/// Keep only a device's newest one-time prekeys, so uploading more again and again can't grow the database.
+fn trim_prekeys(db: &Connection, account: &str, device: u32) -> rusqlite::Result<()> {
+    for (table, keep) in [("prekeys", MAX_STORED_PREKEYS), ("kyber_prekeys", MAX_STORED_KYBER)] {
+        db.execute(
+            &format!("DELETE FROM {table} WHERE account=?1 AND device=?2 AND rowid NOT IN (SELECT rowid FROM {table} WHERE account=?1 AND device=?2 ORDER BY rowid DESC LIMIT ?3)"),
+            params![account, device, keep],
+        )?;
+    }
+    Ok(())
+}
+
 /// Devices approved but not yet set up (no keys uploaded).
 fn pending_devices(db: &Connection, account: &str) -> Vec<u32> {
     let mut st = db.prepare_cached("SELECT id FROM devices WHERE account=? AND keys IS NULL").expect("query");
@@ -1638,20 +1820,34 @@ fn bundle(app: &App, db: &Connection, id: &str, device: u32, requester: Option<&
     Ok(bundle)
 }
 
-/// One identified sender's part of a recipient's queue: a quarter of it, by count and by bytes.
-fn sender_share_full(db: &Connection, to: &str, from: &str) -> bool {
-    db.query_row("SELECT count(*), coalesce(sum(length(body)), 0) FROM messages WHERE recipient=? AND sender=?", [to, from], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
-        .map_or(true, |(n, bytes)| n >= MAX_QUEUED_PER_RECIPIENT / 4 || bytes >= MAX_QUEUED_BYTES / 4)
+/// Can `from` ("" for sealed) add `msgs` to `to`'s offline queue? It's capped by count and by bytes
+/// (stored UTF-8 bytes, not characters), and split so nobody can fill it to lock everyone else out:
+/// - sealed messages (contacts holding the access key, who the server can't tell apart) get at most
+///   three quarters, so a contact abusing the key can't block strangers' requests or the recipient's
+///   own devices;
+/// - identified senders other than the recipient get at most three quarters together, and a quarter
+///   each, so a few strangers can't block the contacts who write sealed;
+/// - the recipient's own devices (syncing) only count against the whole.
+fn queue_admits(db: &Connection, to: &str, from: &str, msgs: &[DeviceMsg]) -> bool {
+    let sql = "SELECT count(*), coalesce(sum(len), 0),
+                      coalesce(sum(sender = ''), 0), coalesce(sum(CASE WHEN sender = '' THEN len END), 0),
+                      coalesce(sum(sender NOT IN ('', ?1)), 0), coalesce(sum(CASE WHEN sender NOT IN ('', ?1) THEN len END), 0),
+                      coalesce(sum(sender = ?2), 0), coalesce(sum(CASE WHEN sender = ?2 THEN len END), 0)
+               FROM (SELECT sender, octet_length(body) AS len FROM messages WHERE recipient = ?1)";
+    let Ok(u) = db.query_row(sql, [to, from], |r| (0..8).map(|i| r.get::<_, i64>(i)).collect::<rusqlite::Result<Vec<i64>>>()) else { return false };
+    let (n, bytes) = (msgs.len() as i64, msgs.iter().map(|m| m.body.len() as i64).sum::<i64>());
+    let fits = |used: i64, used_bytes: i64, share: i64| used + n <= MAX_QUEUED_PER_RECIPIENT * share / 4 && used_bytes + bytes <= MAX_QUEUED_BYTES * share / 4;
+    fits(u[0], u[1], 4)
+        && match from {
+            "" => fits(u[2], u[3], 3),
+            f if f == to => true,
+            _ => fits(u[4], u[5], 3) && fits(u[6], u[7], 1),
+        }
 }
 
-/// A recipient's offline queue is capped by count and bytes, so nobody can fill it to lock them out.
-fn queue_full(db: &Connection, to: &str) -> bool {
-    db.query_row("SELECT count(*), coalesce(sum(length(body)), 0) FROM messages WHERE recipient=?", [to], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
-        .map_or(true, |(n, bytes)| n >= MAX_QUEUED_PER_RECIPIENT || bytes >= MAX_QUEUED_BYTES)
-}
-
-fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg], urgent: bool, call: bool) -> Result<Value, String> {
-    if msgs.iter().any(|m| m.body.len() > MAX_BODY) {
+fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg], urgent: bool) -> Result<Value, String> {
+    // At most one copy per device, checked before the database lock is taken.
+    if msgs.len() > MAX_DEVICES as usize || msgs.iter().any(|m| m.body.len() > MAX_BODY) {
         return Err("too_large".into());
     }
     let me = cx.me;
@@ -1669,12 +1865,7 @@ fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg], urgent: bool, cal
         if let Err(mismatch) = check_devices(&db, to, (to == me).then_some(cx.device), msgs) {
             return Ok(mismatch);
         }
-        if queue_full(&db, to) {
-            return Err("recipient_full".into());
-        }
-        // One sender can't take up an offline recipient's whole queue and lock everyone else out.
-        // (Your own devices are exempt: that's syncing, not someone else's queue.)
-        if to != me && sender_share_full(&db, to, me) {
+        if !queue_admits(&db, to, me, msgs) {
             return Err("recipient_full".into());
         }
         let mut ids = vec![];
@@ -1688,7 +1879,7 @@ fn send_msg(app: &App, cx: &Ctx, to: &str, msgs: &[DeviceMsg], urgent: bool, cal
     for (m, id) in msgs.iter().zip(&ids) {
         push(app, to, m.device, json!({"t": "msg", "id": id, "from": me, "dev": cx.device, "body": m.body, "ts": ts}));
         if urgent {
-            wake(app, to, m.device, call);
+            wake(app, to, m.device, false);
         }
     }
     Ok(json!({"ts": ts}))
@@ -1872,11 +2063,120 @@ mod tests {
     fn one_sender_gets_a_quarter_of_a_queue() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY, recipient TEXT, device INTEGER, sender TEXT, sender_device INTEGER, body TEXT, ts INTEGER);").unwrap();
-        let add = |from: &str, n: i64| (0..n).for_each(|_| drop(db.execute("INSERT INTO messages(recipient, device, sender, sender_device, body, ts) VALUES('bob', 1, ?, 1, 'x', 0)", [from])));
-        add("spammer", MAX_QUEUED_PER_RECIPIENT / 4);
-        assert!(sender_share_full(&db, "bob", "spammer"));
-        assert!(!sender_share_full(&db, "bob", "alice"), "others can still write");
-        assert!(!queue_full(&db, "bob"));
+        let add = |from: &str, n: i64| {
+            let mut st = db.prepare("INSERT INTO messages(recipient, device, sender, sender_device, body, ts) VALUES('bob', 1, ?, 1, 'x', 0)").unwrap();
+            (0..n).for_each(|_| drop(st.execute([from])));
+        };
+        let one = [DeviceMsg { device: 1, body: "x".into() }];
+        let ok = |from: &str| queue_admits(&db, "bob", from, &one);
+        let quarter = MAX_QUEUED_PER_RECIPIENT / 4;
+        add("spammer", quarter);
+        assert!(!ok("spammer"));
+        assert!(ok("alice"), "others can still write");
+        // Three strangers fill what identified senders may use: a fourth can't get in, but contacts
+        // writing sealed, and the recipient's own devices, still can.
+        add("spammer2", quarter);
+        add("spammer3", quarter);
+        assert!(!ok("alice"));
+        assert!(ok(""), "sealed contacts keep their room");
+        assert!(ok("bob"), "own devices keep theirs");
+        // One contact abusing the sealed access key fills at most three quarters: requests and the
+        // recipient's own devices still get through.
+        db.execute("DELETE FROM messages", []).unwrap();
+        add("", quarter * 3);
+        assert!(!ok(""));
+        assert!(ok("alice") && ok("bob"));
+        // Own devices are limited only by the whole queue.
+        add("bob", quarter);
+        assert!(!ok("bob") && !ok("alice"));
+    }
+
+    #[test]
+    fn queued_bytes_are_utf8_bytes() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY, recipient TEXT, device INTEGER, sender TEXT, sender_device INTEGER, body TEXT, ts INTEGER);").unwrap();
+        // A quarter of the byte budget in four-byte characters: a quarter by bytes, a sixteenth by characters.
+        let body = "\u{1F600}".repeat((MAX_QUEUED_BYTES / 16) as usize);
+        db.execute("INSERT INTO messages(recipient, device, sender, sender_device, body, ts) VALUES('bob', 1, 'eve', 1, ?, 0)", [&body]).unwrap();
+        assert!(!queue_admits(&db, "bob", "eve", &[DeviceMsg { device: 1, body: "x".into() }]), "the share counts bytes");
+        // The message being sent counts too.
+        let big = DeviceMsg { device: 1, body: "x".repeat(MAX_BODY) };
+        db.execute("DELETE FROM messages", []).unwrap();
+        let filler = "x".repeat((MAX_QUEUED_BYTES / 4) as usize - MAX_BODY + 1);
+        db.execute("INSERT INTO messages(recipient, device, sender, sender_device, body, ts) VALUES('bob', 1, 'eve', 1, ?, 0)", [&filler]).unwrap();
+        assert!(!queue_admits(&db, "bob", "eve", std::slice::from_ref(&big)));
+        assert!(queue_admits(&db, "bob", "eve", &[DeviceMsg { device: 1, body: "x".repeat(MAX_BODY - 1) }]));
+    }
+
+    #[test]
+    fn backlog_is_replayed_in_pages() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY, recipient TEXT, device INTEGER, sender TEXT, sender_device INTEGER, body TEXT, ts INTEGER);").unwrap();
+        let body = "x".repeat(250 * 1024);
+        for d in [1, 1, 2, 1, 1, 1, 1, 1] {
+            db.execute("INSERT INTO messages(recipient, device, sender, sender_device, body, ts) VALUES('bob', ?, '', 0, ?, 0)", params![d, body]).unwrap();
+        }
+        let upto = 7;
+        let (mut after, mut got, mut pages) = (0, vec![], 0);
+        loop {
+            let page = queue_page(&db, "bob", 1, after, upto).unwrap();
+            let Some(last) = page.last() else { break };
+            after = last["id"].as_i64().unwrap();
+            assert!(page.len() <= 5, "about a megabyte a page");
+            got.extend(page.iter().map(|m| m["id"].as_i64().unwrap()));
+            pages += 1;
+        }
+        assert_eq!(got, vec![1, 2, 4, 5, 6, 7], "this device's, in order, up to the backlog at login");
+        assert!(pages >= 2);
+        assert_eq!(queue_page(&db, "bob", 1, 0, 0).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn sockets_are_capped_per_network_and_in_all() {
+        let mut c = HashMap::new();
+        assert!(slot_take(&mut c, "a", 2, 3) && slot_take(&mut c, "a", 2, 3));
+        assert!(!slot_take(&mut c, "a", 2, 3), "per network");
+        assert!(slot_take(&mut c, "b", 2, 3));
+        assert!(!slot_take(&mut c, "c", 2, 3), "in all");
+        slot_release(&mut c, "a");
+        assert!(slot_take(&mut c, "c", 2, 3));
+        for k in ["a", "b", "c"] {
+            slot_release(&mut c, k);
+        }
+        assert!(c.is_empty(), "closed sockets leave nothing behind");
+    }
+
+    #[test]
+    fn stored_prekeys_and_reports_are_bounded() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE prekeys(account TEXT NOT NULL, device INTEGER NOT NULL, id INTEGER NOT NULL, key TEXT NOT NULL, PRIMARY KEY(account, device, id));
+             CREATE TABLE kyber_prekeys(account TEXT NOT NULL, device INTEGER NOT NULL, id INTEGER NOT NULL, key TEXT NOT NULL, sig TEXT NOT NULL, PRIMARY KEY(account, device, id));
+             CREATE TABLE reports(reporter TEXT NOT NULL, reported TEXT NOT NULL, ts INTEGER NOT NULL);",
+        )
+        .unwrap();
+        for id in 0..MAX_STORED_PREKEYS + 50 {
+            db.execute("INSERT INTO prekeys VALUES('a', 1, ?, 'k')", [id]).unwrap();
+            db.execute("INSERT INTO kyber_prekeys VALUES('a', 1, ?, 'k', 's')", [id]).unwrap();
+        }
+        db.execute("INSERT INTO prekeys VALUES('a', 2, 1, 'k')", []).unwrap();
+        trim_prekeys(&db, "a", 1).unwrap();
+        let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(count("SELECT count(*) FROM prekeys WHERE device=1"), MAX_STORED_PREKEYS);
+        assert_eq!(count("SELECT count(*) FROM kyber_prekeys"), MAX_STORED_KYBER);
+        assert_eq!(count("SELECT min(id) FROM prekeys WHERE device=1"), 50, "the newest stay");
+        assert_eq!(count("SELECT count(*) FROM prekeys WHERE device=2"), 1, "other devices untouched");
+
+        for _ in 0..3 {
+            add_report(&db, "r", "x", 1).unwrap();
+        }
+        assert_eq!(count("SELECT count(*) FROM reports"), 1, "repeats don't add rows");
+        for i in 0..MAX_REPORTS + 5 {
+            add_report(&db, "r", &format!("t{i}"), 2).unwrap();
+        }
+        add_report(&db, "other", "x", 3).unwrap();
+        assert_eq!(count("SELECT count(*) FROM reports WHERE reporter='r'"), MAX_REPORTS);
+        assert_eq!(count("SELECT count(*) FROM reports WHERE reporter='other'"), 1);
     }
 
     #[test]
@@ -1886,5 +2186,110 @@ mod tests {
         assert!(!valid_username("9lives"));
         assert!(!valid_username("Alice"));
         assert!(!valid_username("a-b-c"));
+    }
+
+    /// An App over an in-memory database with the production schema (as migrated).
+    fn test_app() -> App {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE accounts(id TEXT PRIMARY KEY, username TEXT UNIQUE, keys TEXT NOT NULL, created INTEGER NOT NULL, access TEXT, backup TEXT);
+             CREATE TABLE prekeys(account TEXT NOT NULL, id INTEGER NOT NULL, key TEXT NOT NULL, PRIMARY KEY(account, id));
+             CREATE TABLE kyber_prekeys(account TEXT NOT NULL, id INTEGER NOT NULL, key TEXT NOT NULL, sig TEXT NOT NULL, PRIMARY KEY(account, id));
+             CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, ts INTEGER NOT NULL);
+             CREATE TABLE devices(account TEXT NOT NULL, id INTEGER NOT NULL, keys TEXT, name TEXT, created INTEGER NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(account, id));
+             CREATE TABLE push_tokens(account TEXT NOT NULL, device INTEGER NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(account, device));",
+        )
+        .unwrap();
+        migrate_devices(&db);
+        let (wakes, _) = mpsc::unbounded_channel();
+        App {
+            db: Mutex::new(db),
+            online: Mutex::default(),
+            conns: Mutex::default(),
+            links: Mutex::default(),
+            channels: Mutex::default(),
+            blobs: std::env::temp_dir(),
+            uploads: Mutex::default(),
+            backup_slots: Mutex::default(),
+            ice_host: None,
+            turn_secret: None,
+            limits: Limiter::default(),
+            pow_bits: 0,
+            trust_proxy: false,
+            host: None,
+            signup_burst: 10.0,
+            trust_root: vec![],
+            server_cert: vec![],
+            server_key: vec![],
+            pusher: push::Pusher::from_env(),
+            wakes,
+        }
+    }
+
+    fn go_online(app: &App, key: &str) -> (mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>, tokio_util::sync::CancellationToken) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let end = tokio_util::sync::CancellationToken::new();
+        app.online.lock().unwrap().insert(key.into(), Online { tx: tx.clone(), end: end.clone(), away: false });
+        (tx, rx, end)
+    }
+
+    #[test]
+    fn unlinking_a_device_cuts_it_off_at_once() {
+        let app = Arc::new(test_app());
+        {
+            let db = app.db.lock().unwrap();
+            db.execute_batch(
+                "INSERT INTO accounts(id, keys, created, main, next_device) VALUES('alice', '{}', 0, 'mainkey', 3);
+                 INSERT INTO devices(account, id, keys, created, seen) VALUES('alice', 1, '{}', 0, 0);
+                 INSERT INTO devices(account, id, keys, created, seen, key) VALUES('alice', 2, '{}', 0, 0, 'dkey');
+                 INSERT INTO messages(recipient, device, sender, sender_device, body, ts) VALUES('alice', 2, 'bob', 1, 'queued', 0), ('alice', 1, 'bob', 1, 'kept', 0);
+                 INSERT INTO push_tokens VALUES('alice', 2, 'fcm', 'tok');",
+            )
+            .unwrap();
+        }
+        let (_tx, mut rx, end) = go_online(&app, "alice.2");
+        let (_tx1, _rx1, end1) = go_online(&app, "alice.1");
+        assert!(device_exists(&app, "alice", 2));
+        remove_device(&app, &app.db.lock().unwrap(), "alice", 2).unwrap();
+        // Its connection is told to end, and nothing more is put in its outbox (the "unlinked" notice
+        // comes from the connection itself, after it drops whatever was still waiting).
+        assert!(end.is_cancelled());
+        assert!(rx.try_recv().is_err());
+        assert!(!app.online.lock().unwrap().contains_key("alice.2"));
+        // Every later request fails, and its queue and push token are gone; the main device is untouched.
+        assert!(!device_exists(&app, "alice", 2));
+        let db = app.db.lock().unwrap();
+        let left: Vec<String> = db.prepare("SELECT body FROM messages").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(left, vec!["kept".to_string()]);
+        assert_eq!(db.query_row("SELECT count(*) FROM push_tokens", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert!(!end1.is_cancelled());
+    }
+
+    #[test]
+    fn a_connection_leaves_the_online_list_only_if_still_current() {
+        let app = Arc::new(test_app());
+        let (old, _rx, _) = go_online(&app, "alice.1");
+        drop(Leave { app: app.clone(), key: "alice.1".into(), tx: old.clone() });
+        assert!(!app.online.lock().unwrap().contains_key("alice.1"), "an ended connection leaves");
+        let (old, _rx, _) = go_online(&app, "alice.1");
+        let (_new, _rx2, _) = go_online(&app, "alice.1");
+        drop(Leave { app: app.clone(), key: "alice.1".into(), tx: old });
+        assert!(app.online.lock().unwrap().contains_key("alice.1"), "a replaced one doesn't take its successor along");
+    }
+
+    #[test]
+    fn legacy_main_key_migration_only_for_never_linked_accounts() {
+        let db = test_app().db.into_inner().unwrap();
+        db.execute_batch(
+            "INSERT INTO accounts(id, keys, created) VALUES('fresh', '{}', 0), ('linked', '{}', 0), ('was_linked', '{}', 0);
+             INSERT INTO devices(account, id, keys, created, seen) VALUES('fresh', 1, '{}', 0, 0), ('linked', 1, '{}', 0, 0), ('linked', 2, NULL, 0, 0), ('was_linked', 1, '{}', 0, 0);
+             UPDATE accounts SET next_device=3 WHERE id IN ('linked', 'was_linked');",
+        )
+        .unwrap();
+        assert!(never_linked(&db, "fresh"));
+        assert!(!never_linked(&db, "linked"), "has a linked device");
+        assert!(!never_linked(&db, "was_linked"), "had one: it may still hold the identity key");
+        assert!(!never_linked(&db, "nobody"));
     }
 }

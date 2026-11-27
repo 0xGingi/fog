@@ -27,6 +27,8 @@ export type Att = {
 export const MAX_FILE = 2 * 1024 ** 3
 /** Files above this go up in encrypted 4 MB chunks, and resume if the connection drops. */
 const CHUNKED_ABOVE = 32 * 1024 * 1024
+/** Before chunked uploads, files went up whole, up to this size. */
+const OLD_MAX_FILE = 100 * 1024 * 1024
 const CHUNK = 4 * 1024 * 1024
 const TAG = 16
 
@@ -233,15 +235,20 @@ export function download(att: Att): Promise<string | null> {
         setT(att.lid, null)
         return localUrl(att.lid)
       }
-      const total = Number(r.headers.get('content-length')) || att.size || 1
+      // The sealed file is exactly this long (nonce + padded size + tag): the sender's message says
+      // how big it is, and a pointer to some bigger blob mustn't make us fetch all of it.
+      const max = 12 + padBucket(Math.min(att.size || OLD_MAX_FILE, OLD_MAX_FILE)) + TAG
+      if (Number(r.headers.get('content-length')) > max) throw new Error('too long')
+      const total = Number(r.headers.get('content-length')) || max
       const reader = r.body.getReader()
       const parts: Uint8Array[] = []
       let got = 0
       for (;;) {
         const { done, value } = await reader.read()
         if (done) break
-        parts.push(value)
         got += value.length
+        if (got > max) throw (reader.cancel().catch(() => {}), new Error('too long'))
+        parts.push(value)
         setT(att.lid, { p: Math.min(1, got / total), dir: 'down' })
       }
       const data = new Uint8Array(got)
@@ -295,9 +302,10 @@ async function decryptChunked(body: ReadableStream<Uint8Array>, att: Att): Promi
   for (;;) {
     const { done, value } = await reader.read()
     if (value) {
+      got += value.length
+      if (got > total) throw (reader.cancel().catch(() => {}), new Error('too long'))
       pending.push(value)
       pendingLen += value.length
-      got += value.length
       setT(att.lid, { p: Math.min(1, got / total), dir: 'down' })
     }
     while (i < n && pendingLen >= chunkLen(i)) {

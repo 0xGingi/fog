@@ -80,6 +80,20 @@ async function unseal(key: string, s: Sealed): Promise<unknown> {
 }
 const isSealed = (v: any): v is Sealed => v && typeof v === 'object' && v.__fog === 1
 
+/**
+ * Writes to one key commit in the order they were made, though sealing each takes a while: otherwise
+ * an older snapshot still being sealed could land after a newer one (a just-received message gone).
+ * Converting a key for the lock (read, seal or unseal, write back) waits its turn the same way.
+ */
+const queues = new Map<string, Promise<unknown>>()
+function inTurn<T>(key: string, f: () => Promise<T>): Promise<T> {
+  const run = (queues.get(key) ?? Promise.resolve()).then(f, f)
+  const tail = run.catch(() => {})
+  queues.set(key, tail)
+  void tail.then(() => queues.get(key) === tail && queues.delete(key))
+  return run
+}
+
 /** get (value omitted), put (value), or delete (null). Transparent encryption when the app lock is on. */
 export async function kv<T>(key: string, value?: T | null): Promise<T | undefined> {
   if (value === undefined) {
@@ -91,7 +105,7 @@ export async function kv<T>(key: string, value?: T | null): Promise<T | undefine
   }
   // Seal before opening the transaction: IndexedDB transactions don't survive awaiting other work.
   // While the lock is being turned off, new writes go in plaintext (the key is about to be dropped).
-  return raw(key, value !== null && dek && key !== LOCK && migrating !== 'off' ? await seal(key, value) : value)
+  return inTurn(key, async () => raw<T>(key, value !== null && dek && key !== LOCK && migrating !== 'off' ? await seal(key, value) : value))
 }
 
 export async function kvClear() {
@@ -99,6 +113,11 @@ export async function kvClear() {
   dek = dekRaw = null
   migrating = null
   if (store) return store.clear()
+  // The few small things kept outside kv (recent emoji) go too: the next person on this browser
+  // shouldn't see them.
+  try {
+    localStorage.clear()
+  } catch {}
   const db = await idb()
   await new Promise((res) => {
     const tx = db.transaction('kv', 'readwrite')
@@ -137,10 +156,11 @@ async function useDek(bytes: Uint8Array<ArrayBuffer>) {
   dekRaw = bytes
   dek = await subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt'])
   // Records sealed before key binding existed get re-sealed with it.
-  for (const k of await allKeys()) {
-    const v = await raw<unknown>(k)
-    if (isSealed(v) && !v.a) await raw(k, await seal(k, await unseal(k, v)))
-  }
+  for (const k of await allKeys())
+    await inTurn(k, async () => {
+      const v = await raw<unknown>(k)
+      if (isSealed(v) && !v.a) await raw(k, await seal(k, await unseal(k, v)))
+    })
   // Turning the lock on or off was interrupted (app closed, storage error): finish it now.
   const m = await raw<unknown>(MIG)
   migrating = isSealed(m) ? ((await unseal(MIG, m)) as 'on' | 'off') : null
@@ -149,20 +169,23 @@ async function useDek(bytes: Uint8Array<ArrayBuffer>) {
 }
 /** Seal every record still in plaintext, then mark the conversion done. */
 async function finishOn() {
-  // Re-read each value right before sealing it, so writes that land mid-migration aren't lost.
-  for (const k of await allKeys()) {
-    const v = await raw<unknown>(k)
-    if (v !== undefined && !isSealed(v)) await raw(k, await seal(k, v))
-  }
+  // Each value is re-read right before sealing it, in turn with other writes to its key, so writes
+  // that land mid-migration aren't lost.
+  for (const k of await allKeys())
+    await inTurn(k, async () => {
+      const v = await raw<unknown>(k)
+      if (v !== undefined && !isSealed(v)) await raw(k, await seal(k, v))
+    })
   await raw(MIG, null)
   migrating = null
 }
 /** Decrypt every sealed record, then remove the lock (and the key) for good. */
 async function finishOff() {
-  for (const k of await allKeys()) {
-    const v = await raw<unknown>(k)
-    if (isSealed(v)) await raw(k, await unseal(k, v))
-  }
+  for (const k of await allKeys())
+    await inTurn(k, async () => {
+      const v = await raw<unknown>(k)
+      if (isSealed(v)) await raw(k, await unseal(k, v))
+    })
   await raw(LOCK, null)
   await raw(MIG, null)
   lockOn = Promise.resolve(false)

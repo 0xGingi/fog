@@ -3,6 +3,7 @@
 // syntax (a reply still streaming in, an unclosed code block) renders as well as it can.
 import { useState, useSyncExternalStore, type ReactNode } from 'react'
 import { copy, Dialog, Button, Icon } from './ui'
+import { externalClick, openExternal } from './fog'
 
 // ---------- links: a link whose text isn't its address asks first, so "[mybank.com](evil.example)" can't fool anyone ----------
 let asking: string | null = null
@@ -28,7 +29,7 @@ export function LinkCheck() {
           <Button kind="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button onClick={() => (window.open(url, '_blank', 'noopener,noreferrer'), close())}>Open {host}</Button>
+          <Button onClick={() => (openExternal(url), close())}>Open {host}</Button>
         </>
       }
     >
@@ -45,8 +46,8 @@ function Link({ href, children, plain }: { href: string; children: ReactNode; pl
       rel="noopener noreferrer"
       className="[overflow-wrap:anywhere] underline decoration-current/40 underline-offset-2 hover:decoration-current"
       onClick={(e) => {
+        if (plain) return externalClick(e, href)
         e.stopPropagation()
-        if (plain) return
         e.preventDefault()
         openLink(href)
       }}
@@ -57,8 +58,11 @@ function Link({ href, children, plain }: { href: string; children: ReactNode; pl
 }
 
 // ---------- inline ----------
+// Linear time on hostile input: an opener that can't close mustn't scan the rest of the line, or a
+// line of thousands of `[` or ` *a` costs n² steps. So single `*`/`_` emphasis can't contain its own
+// marker, link text stops at the next bracket and a link address at the next parenthesis.
 const INLINE =
-  /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)|\*\*(.+?)\*\*|__(.+?)__|(?<![\p{L}\p{N}*])\*(?!\s)(.+?)(?<!\s)\*(?![\p{L}\p{N}*])|(?<![\p{L}\p{N}_])_(?!\s)(.+?)(?<!\s)_(?![\p{L}\p{N}_])|~~(.+?)~~|\|\|(.+?)\|\||\[([^\]\n]+)\]\(\s*<?([^)\s>]+)>?\s*\)|(https?:\/\/[^\s<]+[^\s<.,:;"')\]!?*_])|((?<![\w@])@[a-z][a-z0-9_]{2,31}\b)/gu
+  /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)|\*\*(.+?)\*\*|__(.+?)__|(?<![\p{L}\p{N}*])\*(?!\s)([^*]+?)(?<!\s)\*(?![\p{L}\p{N}*])|(?<![\p{L}\p{N}_])_(?!\s)([^_]+?)(?<!\s)_(?![\p{L}\p{N}_])|~~(.+?)~~|\|\|(.+?)\|\||\[([^\[\]\n]+)\]\(\s*<?([^()\s>]+)>?\s*\)|(https?:\/\/[^\s<]+[^\s<.,:;"')\]!?*_])|((?<![\w@])@[a-z][a-z0-9_]{2,31}\b)/gu
 
 function Spoiler({ children }: { children: ReactNode }) {
   const [shown, setShown] = useState(false)
@@ -72,9 +76,14 @@ function Spoiler({ children }: { children: ReactNode }) {
 /** How deep formatting and blocks may nest. A message of thousands of `>` or `*_*_` would otherwise
  *  recurse until the renderer runs out of stack; past this, the rest shows as plain text. */
 const MAX_DEPTH = 8
+/** Longer lines show as plain text: a backstop on formatting work for one line. */
+const MAX_LINE = 10_000
+/** A table this wide or long shows only its first columns/rows as a table (each cell is a node). */
+const MAX_COLS = 32
+const MAX_ROWS = 500
 
 export function inline(s: string, key: string, depth = 0): ReactNode[] {
-  if (depth > MAX_DEPTH) return [s]
+  if (depth > MAX_DEPTH || s.length > MAX_LINE) return [s]
   const out: ReactNode[] = []
   let last = 0
   let i = 0
@@ -173,11 +182,11 @@ function blocks(src: string[], key: string, depth = 0): ReactNode[] {
       continue
     }
     if (l.includes('|') && i + 1 < src.length && TABLE_SEP.test(src[i + 1]) && src[i + 1].includes('-')) {
-      const head = cells(l)
+      const head = cells(l).slice(0, MAX_COLS)
       const align = cells(src[i + 1]).map((c) => (c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : 'left') as 'left')
       i += 2
       const body: string[][] = []
-      while (i < src.length && src[i].includes('|') && src[i].trim()) body.push(cells(src[i++]))
+      while (i < src.length && body.length < MAX_ROWS && src[i].includes('|') && src[i].trim()) body.push(cells(src[i++]))
       out.push(
         <div key={k()} className="scroll-thin my-1 overflow-x-auto">
           <table className="border-collapse text-[0.92em]">
@@ -267,10 +276,10 @@ export function Md({ text }: { text: string }) {
   return <div className="space-y-1.5 [&_li>p]:inline">{blocks(text.replace(/\r\n?/g, '\n').split('\n'), 'md')}</div>
 }
 
-/** Markdown down to plain text, for chat-list previews and notifications. */
+/** Markdown down to plain text, for chat-list previews and notifications (callers cut it short first). */
 export const mdPlain = (t: string) =>
   t
     .replace(/^ {0,3}(#{1,6}|>|[-*+]|\d+[.)])\s+/gm, '')
     .replace(/```[\w+#.-]*\n?|`/g, '')
     .replace(/\*\*|__|~~|\|\|/g, '')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\[\]]+)\]\([^()]+\)/g, '$1')

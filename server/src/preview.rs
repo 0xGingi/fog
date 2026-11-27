@@ -4,6 +4,7 @@
 //! public addresses only, resolved once and pinned (no DNS rebinding), redirects re-checked,
 //! small size and time limits.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
@@ -12,6 +13,49 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 
 static PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+/// Previews admitted (running or waiting for a permit), overall and per account. Past these a
+/// request is refused straight away instead of queueing behind slow sites.
+const MAX_PENDING: usize = 32;
+const MAX_PENDING_EACH: usize = 2;
+/// One deadline for a whole preview: waiting for a permit, redirects, DNS and the image.
+const DEADLINE: Duration = Duration::from_secs(15);
+/// Previews admitted: in all, and per account.
+type Pending = (usize, HashMap<String, usize>);
+static PENDING: std::sync::LazyLock<std::sync::Mutex<Pending>> = std::sync::LazyLock::new(Default::default);
+
+/// A place in the preview queue; dropping it gives the place back.
+pub struct Ticket(String);
+
+/// Admit one preview for `who`, or None when the queue (or their share of it) is full.
+pub fn admit(who: &str) -> Option<Ticket> {
+    take(&mut PENDING.lock().unwrap(), who).then(|| Ticket(who.to_owned()))
+}
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        give_back(&mut PENDING.lock().unwrap(), &self.0);
+    }
+}
+
+fn take(p: &mut Pending, who: &str) -> bool {
+    let mine = p.1.get(who).copied().unwrap_or(0);
+    if p.0 >= MAX_PENDING || mine >= MAX_PENDING_EACH {
+        return false;
+    }
+    p.0 += 1;
+    p.1.insert(who.to_owned(), mine + 1);
+    true
+}
+
+fn give_back(p: &mut Pending, who: &str) {
+    p.0 -= 1;
+    if let Some(n) = p.1.get_mut(who) {
+        *n -= 1;
+        if *n == 0 {
+            p.1.remove(who);
+        }
+    }
+}
 
 pub fn is_public(ip: IpAddr) -> bool {
     match ip {
@@ -35,14 +79,12 @@ pub fn is_public(ip: IpAddr) -> bool {
                 return is_public(IpAddr::V4(v4));
             }
             let [s0, s1, ..] = v6.segments();
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (s0 & 0xfe00) == 0xfc00 // unique local
-                || (s0 & 0xffc0) == 0xfe80 // link local
-                || (s0 == 0x64 && s1 == 0xff9b) // NAT64: embeds an IPv4 address we can't vet
-                || s0 == 0x2002 // 6to4: same
-                || (s0 == 0x2001 && (s1 == 0 || s1 == 0xdb8))) // Teredo, documentation
+            // Only global unicast (2000::/3), which leaves out loopback, unique and link local, the old
+            // site-local fec0::/10, multicast, NAT64 (64:ff9b::/96, embeds an IPv4 address we can't vet)
+            // and the rest of the special ranges.
+            (s0 & 0xe000) == 0x2000
+                && s0 != 0x2002 // 6to4: embeds an IPv4 address too
+                && !(s0 == 0x2001 && (s1 == 0 || s1 == 0xdb8)) // Teredo, documentation
         }
     }
 }
@@ -146,7 +188,12 @@ pub fn parse(html: &str) -> (Option<String>, Option<String>, Option<String>, Opt
     (clip(title, 200), clip(desc, 300), image, clip(site, 80))
 }
 
-pub async fn fetch(url: &str) -> Result<Value, String> {
+/// A preview, admitted with `admit` first. Gives up after `DEADLINE` in all.
+pub async fn fetch(url: &str, _ticket: Ticket) -> Result<Value, String> {
+    tokio::time::timeout(DEADLINE, fetch_now(url)).await.map_err(|_| "timeout".to_string())?
+}
+
+async fn fetch_now(url: &str) -> Result<Value, String> {
     let _permit = PERMITS.acquire().await.map_err(|_| "busy")?;
     let (final_url, ctype, body) = safe_get(url, 512 * 1024, "text/html,application/xhtml+xml").await?;
     if !ctype.contains("html") {
@@ -180,7 +227,7 @@ mod tests {
 
     #[test]
     fn blocks_internal_addresses() {
-        for ip in ["127.0.0.1", "10.1.2.3", "192.168.1.1", "172.16.0.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1", "64:ff9b::a00:1", "2002:a00:1::1", "2001::1"] {
+        for ip in ["127.0.0.1", "10.1.2.3", "192.168.1.1", "172.16.0.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "198.18.0.1", "240.0.0.1", "::1", "::", "::a00:1", "fd00::1", "fe80::1", "fec0::1", "feff::1", "100::1", "::ffff:127.0.0.1", "64:ff9b::a00:1", "64:ff9b:1::a00:1", "2002:a00:1::1", "2001::1", "2001:db8::1", "ff02::1"] {
             assert!(!is_public(ip.parse().unwrap()), "{ip} should be blocked");
         }
         for ip in ["93.184.216.34", "1.1.1.1", "2606:4700:4700::1111"] {
@@ -204,8 +251,31 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_to_fetch_localhost() {
-        assert!(fetch("http://127.0.0.1:8787/").await.is_err());
-        assert!(fetch("http://localhost/").await.is_err());
-        assert!(fetch("file:///etc/passwd").await.is_err());
+        let t = || admit("t").unwrap();
+        assert!(fetch("http://127.0.0.1:8787/", t()).await.is_err());
+        assert!(fetch("http://localhost/", t()).await.is_err());
+        assert!(fetch("file:///etc/passwd", t()).await.is_err());
+    }
+
+    #[test]
+    fn preview_queue_is_bounded() {
+        let mut p = Pending::default();
+        assert!((0..MAX_PENDING_EACH).all(|_| take(&mut p, "busy")));
+        assert!(!take(&mut p, "busy"), "one account's share");
+        assert!(take(&mut p, "other"), "others still get in");
+        give_back(&mut p, "busy");
+        assert!(take(&mut p, "busy"), "places come back");
+        let n = p.0;
+        assert!((n..MAX_PENDING).all(|i| take(&mut p, &format!("q{i}"))));
+        assert!(!take(&mut p, "late"), "the whole queue");
+        for who in ["busy", "busy", "other"].into_iter().map(String::from).chain((n..MAX_PENDING).map(|i| format!("q{i}"))) {
+            give_back(&mut p, &who);
+        }
+        assert_eq!(p, Pending::default(), "emptied entries go");
+        // The real queue hands out tickets and takes them back when they're dropped.
+        let t = admit("ticket-test").unwrap();
+        assert!(PENDING.lock().unwrap().1.contains_key("ticket-test"));
+        drop(t);
+        assert!(!PENDING.lock().unwrap().1.contains_key("ticket-test"));
     }
 }

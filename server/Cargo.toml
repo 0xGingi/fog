@@ -1,6 +1,6 @@
 [package]
 name = "fog-server"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 
@@ -25,3 +25,5 @@ tokio = { version = "1.54.1", features = ["full"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
 tower-http = { version = "0.7.1", features = ["fs", "set-header", "cors"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }

@@ -6,6 +6,10 @@
     <!-- Incoming calls: a ringing screen over the lock screen. -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- A call keeps going in the background: a foreground service using the microphone (and camera). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <application>
         <meta-data android:name="com.google.firebase.messaging.default_notification_icon" android:resource="@drawable/ic_fog_notification" />
         <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="messages" />
@@ -15,6 +19,7 @@
             </intent-filter>
         </service>
         <receiver android:name="org.getfog.plugin.DeclineCall" android:exported="false" />
+        <service android:name="org.getfog.plugin.CallService" android:exported="false" android:foregroundServiceType="microphone|camera" />
         <!-- No Firebase delivery metrics. -->
         <meta-data android:name="delivery_metrics_exported_to_big_query_enabled" android:value="false" />
     </application>

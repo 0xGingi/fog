@@ -1,6 +1,6 @@
 [package]
 name = "fog-desktop"
-version = "0.4.3"
+version = "0.5.0"
 description = "Fog desktop app"
 license = "AGPL-3.0-only"
 edition = "2024"
@@ -17,6 +17,7 @@ tauri-build = { version = "2.7.6", features = [] }
 serde_json = "1.0.154"
 tauri = { version = "2.12.7", features = ["tray-icon", "image-png"] }
 tauri-plugin-notification = "2.8.1"
+tauri-plugin-opener = "2.7.3"
 
 # Desktop only: self-updates (phones update through TestFlight / a new APK).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

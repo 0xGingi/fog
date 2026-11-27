@@ -6,14 +6,17 @@ import android.app.AlertDialog
 import android.app.DownloadManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.IBinder
 import android.util.Log
 import android.webkit.WebView
 import androidx.appcompat.app.AppCompatActivity
@@ -34,6 +37,7 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
+import androidx.core.app.ServiceCompat
 import org.json.JSONObject
 import java.net.URL
 import kotlin.concurrent.thread
@@ -73,6 +77,25 @@ class FogPlugin(private val activity: Activity) : Plugin(activity) {
                 Log.w("Fog", "no push token: ${e.message}")
                 invoke.reject(e.message ?: "no push token")
             }
+    }
+
+    /**
+     * A call started (`on`) or ended. While it lasts, a foreground service keeps Fog running with the
+     * microphone (and camera, for video) when you switch apps or lock the phone: Android gives a
+     * background app a silent microphone otherwise, so the other side stopped hearing you. Started
+     * while Fog is in front (calls start from the call screen), as Android requires.
+     */
+    @Command
+    fun call(invoke: Invoke) {
+        val args = invoke.getArgs()
+        val service = Intent(activity, CallService::class.java).putExtra("video", args.optBoolean("video", false))
+        try {
+            if (args.optBoolean("on", false)) activity.startService(service) else activity.stopService(service)
+        } catch (e: Exception) {
+            // In the background already (Android refuses to start it from there): the call goes on in front.
+            Log.w("Fog", "call service: ${e.message}")
+        }
+        invoke.resolve()
     }
 
     /**
@@ -177,6 +200,62 @@ object Ringing {
     }
 
     fun stop(ctx: Context) = ctx.getSystemService(NotificationManager::class.java).cancel(ID)
+}
+
+/**
+ * A call in progress: a foreground service of type microphone (plus camera in video calls), so the
+ * call keeps sending your voice while Fog is in the background, with an ongoing "Fog call in
+ * progress" notification that takes you back to it. It holds no media itself; the web view does.
+ * Started with startService while Fog is in front (so a failed startForeground can't crash the app).
+ */
+class CallService : Service() {
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel(CHANNEL, "Ongoing calls", NotificationManager.IMPORTANCE_LOW))
+        val open = packageManager.getLaunchIntentForPackage(packageName)!!.apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val tap = PendingIntent.getActivity(this, 2, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = NotificationCompat.Builder(this, CHANNEL)
+            .setSmallIcon(R.drawable.ic_fog_notification)
+            .setContentTitle("Fog call in progress")
+            .setContentText("Tap to return to the call")
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setOngoing(true)
+            .setSilent(true)
+            .setContentIntent(tap)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .build()
+        // Only the kinds it has permission for (Android 14+ refuses the service otherwise); the page
+        // asked for the microphone (and camera) before the call started.
+        val granted = { p: String -> ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED }
+        var type = 0
+        if (granted(Manifest.permission.RECORD_AUDIO)) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        if (intent?.getBooleanExtra("video", false) == true && granted(Manifest.permission.CAMERA)) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        if (type == 0) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        try {
+            ServiceCompat.startForeground(this, ID, n, type)
+        } catch (e: Exception) {
+            Log.w("Fog", "call service: ${e.message}")
+            stopSelf()
+        }
+        return START_NOT_STICKY
+    }
+
+    // Fog swiped away from recents: the web view (and the call) is gone, so is the notification.
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        stopSelf()
+    }
+
+    private companion object {
+        const val CHANNEL = "call"
+        const val ID = 4343
+    }
 }
 
 /** "Decline" on the ringing screen: stop ringing. (The caller sees no answer.) */
