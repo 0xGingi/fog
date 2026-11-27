@@ -257,10 +257,14 @@ bun web/verify.ts https://getfog.org ./my-build
             <li data-os="android" class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:gap-6">
               <div class="min-w-0 flex-1">
                 <p class="text-lg font-semibold">Android</p>
-                <p class="mt-0.5 text-[15px] text-muted">Android 8 and later. Your phone will ask you to allow installing it the first time.</p>
+                <p class="mt-0.5 text-[15px] text-muted">Android 8 and later. Your phone will ask you to allow installing the APK the first time.</p>
+                <p class="mt-1.5 text-[15px] text-muted">Prefer Google Play? Join the beta: <a href="https://groups.google.com/g/fog-testers" rel="noopener" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">join the tester group</a>, then <a href="https://play.google.com/apps/testing/org.getfog.app" rel="noopener" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">opt in on Google Play</a> with the same Google account, and install Fog from the Play Store.</p>
               </div>
               <div class="flex flex-wrap items-center gap-2 sm:flex-row-reverse sm:justify-start">
                 <a href="https://github.com/0xGingi/fog/releases/latest/download/Fog-Android.apk" class="inline-flex h-11 shrink-0 items-center justify-center rounded-full bg-lamp px-5 font-semibold text-lamp-ink transition hover:brightness-105">Download APK</a>
+                <div class="flex gap-2">
+                  <a href="https://groups.google.com/g/fog-testers" rel="noopener" class="inline-flex h-11 items-center rounded-full border border-line px-4 text-sm font-medium text-muted transition hover:border-muted hover:text-ink">Google Play beta</a>
+                </div>
               </div>
             </li>
             <li data-os="ios" class="flex flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:gap-6">
@@ -321,7 +325,7 @@ bun web/verify.ts https://getfog.org ./my-build
             </li>
           </ul>
           <p class="mt-6 max-w-[48rem] text-[15px] leading-relaxed text-muted">
-            The apps update themselves: the desktop apps in the background, the Android app after asking you, and the iPhone app through TestFlight. Windows builds aren't code-signed yet, so Windows may ask you to confirm the first time you open Fog. Release notes and every past version are on
+            The apps update themselves: the desktop apps in the background, the Android APK after asking you, and the Google Play and iPhone betas through their stores. Windows builds aren't code-signed yet, so Windows may ask you to confirm the first time you open Fog. Release notes and every past version are on
             <a href="https://github.com/0xGingi/fog/releases" rel="noopener" class="font-medium text-ink underline decoration-line underline-offset-4 hover:decoration-lamp">GitHub</a>.
           </p>
         </div>

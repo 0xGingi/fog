@@ -10,7 +10,7 @@ import wasmPath from '../web/src/core/fog_core_bg.wasm' with { type: 'file' }
 
 import { hostedService, TERMS_VERSION } from '../web/src/hostedTerms'
 
-const VERSION = '0.5.1'
+const VERSION = '0.5.2'
 const USAGE = `fog-bot ${VERSION}: run a Fog account as a bot, with a local HTTP API.
 
   fog-bot init [--server URL] [--username NAME] [--name "Display name"] [--owner @you] [--restore]

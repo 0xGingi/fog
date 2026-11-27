@@ -111,7 +111,7 @@ Windows builds are unsigned for now, so SmartScreen warns on first run until a c
 
 ## Mobile Apps
 
-The same client also builds for **Android** (an APK attached to every release as `Fog-Android.apk`) and **iOS** (uploaded to TestFlight; [join the public beta](https://testflight.apple.com/join/A5GN8ENf)), from [`web/src-tauri`](web/src-tauri) with Tauri 2. The phone apps use their own bundle ID, `org.getfog.app`.
+The same client also builds for **Android** (an APK attached to every release as `Fog-Android.apk`) and **iOS** (uploaded to TestFlight; [join the public beta](https://testflight.apple.com/join/A5GN8ENf)), from [`web/src-tauri`](web/src-tauri) with Tauri 2. The phone apps use their own bundle ID, `org.getfog.app`. Android is also in a **Google Play closed beta**: join the [fog-testers group](https://groups.google.com/g/fog-testers) (anyone can), then [opt in on Google Play](https://play.google.com/apps/testing/org.getfog.app) with the same Google account and install Fog from the Play Store.
 
 **Build locally:**
 
@@ -125,7 +125,7 @@ bunx tauri ios build               # needs Xcode
 
 **Notifications** come through Apple's and Google's push services when the server is configured for them (see [Push notifications](#push-notifications)). A push says only "New message"; open Fog to see what it is. Android needs Google Play services for push; without them Fog notifies only while it's open.
 
-**Updates.** iPhones update through TestFlight. The Android app checks the latest release at launch and offers to download and install a newer APK; Android installs it only if it's signed with the same key as the installed app.
+**Updates.** iPhones update through TestFlight, and the Google Play beta through Play. The Android APK checks the latest release at launch and offers to download and install a newer one; Android installs it only if it's signed with the same key as the installed app. The Play build (`FOG_PLAY=1`, the `.aab` in the release workflow's artifacts, uploaded to Play by hand) leaves that updater out, as Play requires.
 
 **Not there yet:** passkey unlock isn't available in the phone apps (passcode lock works). Muted chats still get the generic "New message" push, since the server can't know which chat a message belongs to.
 

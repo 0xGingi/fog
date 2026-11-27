@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { toMarkdown, type Entity } from './markdown'
 
-const VERSION = '0.5.1'
+const VERSION = '0.5.2'
 const USAGE = `fog-telegram ${VERSION}: bridge your Telegram account into Fog, through a fog-bot.
 
   fog-telegram login [--api-id N --api-hash H]   sign in to Telegram (phone, code, 2FA password)
