@@ -35,6 +35,8 @@ You need a fog-bot that only you can reach, and a Telegram API id.
 
    ```sh
    fog-telegram login            # asks for the API id and hash, your phone number, the code, your 2FA password
+   # No code arriving? fog-telegram login --qr shows a QR code to scan from Telegram on your phone
+   # (Settings > Devices > Link Desktop Device) instead.
    fog-telegram run --owner @you
    ```
 

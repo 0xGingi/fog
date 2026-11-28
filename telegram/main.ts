@@ -8,12 +8,15 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
+import { renderANSI } from 'uqr'
 import { toMarkdown, type Entity } from './markdown'
 
 const VERSION = '0.5.2'
 const USAGE = `fog-telegram ${VERSION}: bridge your Telegram account into Fog, through a fog-bot.
 
-  fog-telegram login [--api-id N --api-hash H]   sign in to Telegram (phone, code, 2FA password)
+  fog-telegram login [--api-id N --api-hash H]   sign in to Telegram (phone, code, 2FA password);
+                                                  --qr signs in by scanning a QR code instead (no code needed),
+                                                  --sms asks for the code by SMS instead of in the Telegram app
   fog-telegram run [--owner @you]                 run the bridge (needs \`fog-bot run\` going)
   fog-telegram logout                             sign this bridge out of Telegram and forget the session
 
@@ -34,6 +37,8 @@ const { positionals, values: flags } = parseArgs({
     dir: { type: 'string' },
     bot: { type: 'string' },
     'bot-dir': { type: 'string' },
+    sms: { type: 'boolean' },
+    qr: { type: 'boolean' },
     owner: { type: 'string' },
     'api-id': { type: 'string' },
     'api-hash': { type: 'string' },
@@ -102,7 +107,31 @@ if (cmd === 'login') {
     code: () => ask('Code Telegram sent you:'),
     password: () => hidden('Two-step verification password:'),
     invalidCodeCallback: (t) => console.log(t === 'code' ? 'Wrong code, try again.' : 'Wrong password, try again.'),
-    codeSentCallback: () => console.log('Telegram sent you a code (look in your Telegram app first).'),
+    forceSms: !!flags.sms,
+    // QR login: scan it from another device where you're signed in. Telegram replaces the code every ~30s.
+    qrCodeHandler: flags.qr
+      ? (url) => {
+          process.stdout.write('\x1b[2J\x1b[H')
+          console.log(renderANSI(url, { border: 2 }))
+          console.log('In Telegram on your phone: Settings > Devices > Link Desktop Device, then scan this.')
+          console.log('It refreshes by itself. Press Ctrl+C to cancel.')
+        }
+      : undefined,
+    codeSentCallback: (c) => {
+      if (c.type === 'email_required') fail('Telegram wants a login email set up first: add one in the Telegram app (Settings > Privacy and Security > Login Email), then try again.')
+      const where: Record<string, string> = {
+        app: 'in the Telegram app, in the chat from "Telegram" (blue check) on your other devices',
+        sms: 'by SMS',
+        email: 'to your Telegram login email',
+        call: 'in a phone call',
+        flash_call: 'as the last digits of a missed call',
+        missed_call: 'as the last digits of a missed call',
+        fragment: 'through Fragment (fragment.com)',
+        firebase: 'by SMS',
+      }
+      console.log(`Telegram sent you a code ${where[c.type] ?? `(${c.type})`}.`)
+      if (c.type === 'app') console.log('Nothing there? Press Ctrl+C and run `fog-telegram login --qr` to sign in with a QR code instead.')
+    },
   })
   console.log(`Signed in to Telegram as ${me.displayName}. Now: fog-telegram run --owner @you`)
   await tg.destroy()
